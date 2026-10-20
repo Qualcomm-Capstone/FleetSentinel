@@ -83,3 +83,53 @@ target/
 /docs/realtime-validation-plan.md
 /docs/realtime-validation-results.md
 /scripts/plot-realtime-evidence.py
+/_workspace/
+/docs/evidence/
+/docs/flink-validation-plan.md
+
+# Local blog authoring, screenshots, dashboards and evidence packaging.
+# Keep deployable code and reusable tests tracked; do not ignore scripts/ wholesale.
+/scripts/adjust-claim-check-grafana-annotation.mjs
+/scripts/annotate-*.mjs
+/scripts/remove-claim-check-urp-annotation.mjs
+/scripts/render-html-animation.mjs
+/scripts/audit-blog-evidence.py
+/scripts/blog-evidence-plan.md
+/scripts/build-blog-evidence-dashboards.py
+/scripts/build-claim-check-ab-evidence.py
+/scripts/build-industry-dashboards.py
+/scripts/build-packet-loss-dashboard.py
+/scripts/build-reliability-dashboards.py
+/scripts/build-wal-qualification-dashboard.py
+/scripts/package-blog-evidence.py
+/scripts/package-industry-evidence.py
+/scripts/package-reliability-evidence.py
+/scripts/package-tool-evidence.py
+/scripts/plot-blog-evidence.py
+/scripts/serve-blog-evidence.py
+/scripts/serve-reliability-events.py
+
+# One-off experiments tied to private dated evidence, fixtures or host binaries.
+# Promote to reusable tests only after removing those local dependencies.
+/scripts/verify-blog-evidence.py
+/scripts/run-claim-check-ab.py
+/scripts/run-industry-reliability.py
+/scripts/run-packet-loss-observability.py
+/scripts/run-reliability-experiments.py
+/scripts/analyze-industry-reliability.py
+/scripts/analyze-packet-loss-observability.py
+/scripts/analyze-reliability-experiments.py
+/scripts/analyze-wal-qualification.py
+/scripts/audit-qualification-reporting.py
+/scripts/test_industry_contracts.py
+/scripts/reliability_qualification/
+/scripts/claim-check-ab-plan.md
+/scripts/industry-reliability-plan.md
+/scripts/packet-loss-observability-plan.md
+/scripts/reliability-experiment-plan.md
+/infra/observability/claim-check-compose.override.yml
+/infra/observability/grafana-flink.ini
+/infra/observability/jmx_prometheus_javaagent-1.6.0.jar
+/infra/observability/kafka-jmx-exporter.yml
+/infra/observability/prometheus-claim-check.yml
+/infra/observability/prometheus-flink.yml
