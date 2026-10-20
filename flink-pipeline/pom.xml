@@ -9,7 +9,7 @@
   <version>0.1.0</version>
   <packaging>jar</packaging>
   <name>FleetSentinel Flink Pipeline</name>
-  <description>Kafka → dedup → 검증 → 좌표 파생 → ClickHouse</description>
+  <description>Independent Kafka → alert and Kafka → ClickHouse Flink jobs</description>
 
   <properties>
     <!-- 17, not 21: compose의 Flink 이미지가 flink:2.0.0-java17 이다.

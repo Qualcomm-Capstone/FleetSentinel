@@ -1,6 +1,6 @@
 package io.fleetsentinel.pipeline.transform;
 
-import io.fleetsentinel.pipeline.TelemetryPipeline;
+import io.fleetsentinel.pipeline.PipelineSupport;
 import io.fleetsentinel.pipeline.geo.Enu;
 import io.fleetsentinel.pipeline.model.Decoded;
 import io.fleetsentinel.pipeline.model.DlqRecord;
@@ -182,7 +182,7 @@ public class DecodeFunction extends ProcessFunction<Envelope, Decoded> {
 
     /** 불량 레코드를 곁가지 출력으로 보낸다. 본류(out.collect)와 타입이 달라 태그로 구분한다. */
     private void dlq(Context ctx, Envelope env, ErrorClass cls, String step, String detail) {
-        ctx.output(TelemetryPipeline.DLQ, DlqRecord.of(env, cls, step, detail));
+        ctx.output(PipelineSupport.DLQ, DlqRecord.of(env, cls, step, detail));
     }
 
     /** Avro 맵의 키는 String 이 아니라 Utf8 이라 map.get("translation") 으로는 못 찾는다. */

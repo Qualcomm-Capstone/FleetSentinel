@@ -1,4 +1,4 @@
-# Flink 세션 클러스터 + 잡 제출.
+# Flink 세션 클러스터 + 독립 알림/저장 잡 제출.
 #
 # ⚠️ **Application 모드가 아니라 세션 모드**다. compose 와 같은 구성을 옮긴 것이고,
 #    운영에서는 잡별 격리가 되는 Application 모드나 Flink Kubernetes Operator 가 낫다.
@@ -115,7 +115,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: flink-submit-telemetry
+  name: flink-submit-pipelines
   namespace: fleetsentinel
 spec:
   backoffLimit: 0
@@ -160,11 +160,18 @@ spec:
             - -c
             - |
               set -e
-              flink run -d -m flink-jobmanager:8081 /jobs/flink-pipeline.jar \
+              flink run -d -m flink-jobmanager:8081 \
+                -c io.fleetsentinel.pipeline.AlertPipeline /jobs/flink-pipeline.jar \
                 --bootstrap "$KAFKA_BOOTSTRAP" \
                 --topic telemetry.records \
                 --alert-topic "$ALERT_TOPIC" \
                 --odd-bounds "$ODD_BOUNDS" \
+                --group fleetsentinel-alerts
+              flink run -d -m flink-jobmanager:8081 \
+                -c io.fleetsentinel.pipeline.StoragePipeline /jobs/flink-pipeline.jar \
+                --bootstrap "$KAFKA_BOOTSTRAP" \
+                --topic telemetry.records \
+                --group fleetsentinel-storage \
                 --clickhouse "$CLICKHOUSE_URL" \
                 --clickhouse-user "$CH_USER" \
                 --clickhouse-password "$CH_PASSWORD"

@@ -7,6 +7,12 @@
 # 설계 = docs/sdd.md
 COMPOSE := docker compose -f infra/docker-compose.yml
 export COMPOSE
+STOP_AFTER_MS ?= 30000
+MONITOR_STALE_MS ?= 5000
+CHECKPOINT_MS ?= 10000
+BATCH_SIZE ?= 1000
+ALERT_GROUP ?= fleetsentinel-alerts
+STORAGE_GROUP ?= fleetsentinel-storage
 
 .DEFAULT_GOAL := help
 .PHONY: help up down restart ps logs topics smoke clean pull config ha-demo \
@@ -97,13 +103,22 @@ flink-build: ## 잡 JAR 빌드
 	cd flink-pipeline && JAVA_HOME=$(JAVA21) mvn -B -q package -DskipTests
 	@ls -la $(FLINK_JAR)
 
-flink-submit: flink-build ## 잡을 클러스터에 제출
+flink-submit: flink-build ## 알림·ClickHouse 적재를 독립 Flink 잡으로 제출
 	docker cp $(FLINK_JAR) fleet-jobmanager:/tmp/job.jar
-	$(COMPOSE) exec -T jobmanager flink run -d /tmp/job.jar \
+	$(COMPOSE) exec -T jobmanager flink run -d \
+	  -c io.fleetsentinel.pipeline.AlertPipeline /tmp/job.jar \
 	  --bootstrap kafka1:9092 --topic telemetry.records \
 	  --alert-topic fleet.alerts --odd-bounds "$(ODD_BOUNDS)" \
+	  --group $(ALERT_GROUP) \
+	  --stop-after-ms $(STOP_AFTER_MS) --monitor-stale-ms $(MONITOR_STALE_MS) \
+	  --checkpoint-ms $(CHECKPOINT_MS)
+	$(COMPOSE) exec -T jobmanager flink run -d \
+	  -c io.fleetsentinel.pipeline.StoragePipeline /tmp/job.jar \
+	  --bootstrap kafka1:9092 --topic telemetry.records \
+	  --group $(STORAGE_GROUP) \
 	  --clickhouse "jdbc:ch://clickhouse:8123/fleet" \
-	  --clickhouse-user fleet --clickhouse-password fleet
+	  --clickhouse-user fleet --clickhouse-password fleet \
+	  --checkpoint-ms $(CHECKPOINT_MS) --batch-size $(BATCH_SIZE)
 
 # ── 관제 API ───────────────────────────────────────────────────────────────
 api-build: ## API JAR 빌드
