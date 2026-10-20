@@ -50,7 +50,7 @@ from fleetsentinel_ingest.segment_upload import (  # noqa: E402
     UploadState,
 )
 from fleetsentinel_ingest.shipping import WalShipper  # noqa: E402
-from fleetsentinel_ingest.wal import KIND_SEGMENT_REF, Wal  # noqa: E402
+from fleetsentinel_ingest.wal import Wal  # noqa: E402
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas"
 
@@ -177,7 +177,8 @@ def main() -> int:
             print(f"  {st.segment_id}: {done}/{st.part_count} 파트 완료 → 재개")
             st = uploader.resume(st, on_progress=lambda n, t: None)
             print(f"    ✅ 완료 {st.blob_uri}")
-            _append_ref(wal, fastavro, ref_schema, st, args)
+            _append_ref(uploader, fastavro, ref_schema, st, args,
+                        scene_id=Path(st.mcap_path).stem)
     elif args.resume_only:
         print("미완결 업로드가 없다")
 
@@ -222,7 +223,8 @@ def main() -> int:
 
         dt = time.monotonic() - t0
         print(f"    ✅ {st.blob_uri}  ({size_mib / max(dt, 1e-9):.1f} MiB/s)")
-        _append_ref(wal, fastavro, ref_schema, st, args, scene_id=path.stem, meta=meta)
+        _append_ref(uploader, fastavro, ref_schema, st, args,
+                    scene_id=path.stem, meta=meta)
         uploaded += 1
 
     print(f"\n업로드 {uploaded}건 완료")
@@ -236,14 +238,14 @@ def os_exit():
     os._exit(137)
 
 
-def _append_ref(wal, fastavro, schema, st: UploadState, args,
+def _append_ref(uploader: SegmentUploader, fastavro, schema, st: UploadState, args,
                 scene_id: str = "", meta: dict | None = None) -> None:
-    """③ 업로드가 확정된 뒤에만 `segment-ref`를 WAL에 남긴다."""
+    """업로드가 확정된 뒤 ref를 fsync하고, 그 다음에만 업로드 상태를 지운다."""
     if meta is None:
         meta = _mcap_meta(Path(st.mcap_path))
     buf = io.BytesIO()
     fastavro.schemaless_writer(buf, schema, _segment_ref_row(st, meta, scene_id))
-    seq = wal.append(buf.getvalue(), kind=KIND_SEGMENT_REF)
+    seq = uploader.persist_reference(st, buf.getvalue())
     print(f"    ref WAL seq={seq}")
 
 

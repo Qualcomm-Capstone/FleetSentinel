@@ -11,8 +11,9 @@ stateless 확장 이점이 사라진다 — 게이트웨이를 프록시로 두�
 ```
 1. segment_id 발급 → **의도 파일**을 fsync   ← durable. WAL이 아니다
 2. multipart 업로드 (파트마다 의도 파일 갱신)
-3. 완료 → WAL에 KIND_SEGMENT_REF append
-4. 전송기가 발행 → CACK → 커밋 → 의도 파일 삭제
+3. 완료 확인 → 완료 상태를 의도 파일에 fsync
+4. KIND_SEGMENT_REF를 WAL에 append + fsync → 의도 파일 삭제
+5. 전송기가 발행 → CACK → 커밋
 ```
 
 1이 durable하므로 **어디서 죽든 재시작 후 미완결 `segment_id`를 열거할 수 있다**.
@@ -47,6 +48,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
+
+from .wal import KIND_SEGMENT_REF
 
 __all__ = [
     "DEFAULT_PART_SIZE",
@@ -95,6 +98,9 @@ class UploadState:
     t_start_us: int = 0
     #: 완료된 파트. `{part_number: etag}`
     parts: dict = field(default_factory=dict)
+    #: Complete 응답과 객체 SHA-256 검증까지 끝났는지 여부. 참조 WAL 기록 전에는
+    #: 상태 파일을 지우지 않으므로, 이 값으로 재시작 시 Complete를 반복하지 않는다.
+    object_verified: bool = False
 
     def to_json(self) -> str:
         d = dict(self.__dict__)
@@ -105,6 +111,9 @@ class UploadState:
     def from_json(raw: str) -> "UploadState":
         d = json.loads(raw)
         d["parts"] = {int(k): v for k, v in d.get("parts", {}).items()}
+        # 수정 전 상태 파일도 재개할 수 있어야 한다. 이 경우 Complete를 한 번 더 호출하고,
+        # 서버의 멱등 처리로 이미 완성된 객체를 확인한다.
+        d.setdefault("object_verified", False)
         return UploadState(**d)
 
     @property
@@ -144,6 +153,7 @@ class SegmentUploader:
         with open(tmp, "rb") as f:
             os.fsync(f.fileno())
         tmp.replace(p)
+        self._fsync_state_dir()
 
     def _load(self, segment_id: str) -> Optional[UploadState]:
         p = self._state_path(segment_id)
@@ -162,7 +172,18 @@ class SegmentUploader:
         return out
 
     def _discard(self, segment_id: str) -> None:
-        self._state_path(segment_id).unlink(missing_ok=True)
+        path = self._state_path(segment_id)
+        if path.exists():
+            path.unlink()
+            self._fsync_state_dir()
+
+    def _fsync_state_dir(self) -> None:
+        """rename/unlink 자체도 전원 손실 뒤 남도록 디렉터리를 동기화한다."""
+        fd = os.open(self._state_dir, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     # ── 업로드 ───────────────────────────────────────────────────────────
 
@@ -228,6 +249,9 @@ class SegmentUploader:
         """
         from .proto import ingest_pb2
 
+        if st.object_verified:
+            return st
+
         missing = st.missing_parts()
         if not missing:
             return self._complete(st)
@@ -240,6 +264,30 @@ class SegmentUploader:
         ))
         self._put_parts(st, {u.part_number: u.url for u in resp.part_urls}, on_progress)
         return self._complete(st)
+
+    def persist_reference(self, st: UploadState, payload: bytes) -> int:
+        """검증된 객체의 참조를 WAL에 durable하게 남기고 재개 상태를 정리한다.
+
+        WAL append 뒤 상태 파일 삭제 전에 죽으면 재시작 시 같은 payload를 찾는다. 이 경우
+        새 seq를 만들지 않고 기존 레코드를 재사용한다. 이 순서 덕분에 Kafka가 실패해도
+        참조는 WAL에 남고, 객체만 존재한 채 발견할 수 없는 상태가 되지 않는다.
+        """
+        if not st.object_verified:
+            raise RuntimeError(f"검증되지 않은 객체의 참조는 기록할 수 없다: {st.segment_id}")
+
+        start = max(0, self._wal.committed_seq + 1)
+        seq = None
+        for record in self._wal.read_from(start):
+            if record.kind == KIND_SEGMENT_REF and record.payload == payload:
+                seq = record.seq
+                break
+        if seq is None:
+            seq = self._wal.append(payload, kind=KIND_SEGMENT_REF)
+
+        # 상태 삭제보다 WAL fsync가 반드시 먼저다. Kafka 발행/CACK은 그 다음 단계다.
+        self._wal.flush()
+        self._discard(st.segment_id)
+        return seq
 
     # ── 내부 ─────────────────────────────────────────────────────────────
 
@@ -264,6 +312,9 @@ class SegmentUploader:
     def _complete(self, st: UploadState) -> UploadState:
         from .proto import ingest_pb2
 
+        if st.object_verified:
+            return st
+
         parts = [ingest_pb2.PartEtag(part_number=n, etag=st.parts[n])
                  for n in sorted(st.parts)]
         resp = self._stub.Complete(ingest_pb2.CompleteUploadRequest(
@@ -272,8 +323,10 @@ class SegmentUploader:
         if not resp.verified:
             raise RuntimeError(f"게이트웨이가 무결성을 확인하지 못했다: {st.segment_id}")
         st.blob_uri = resp.blob_uri
-        # 완료됐으므로 재개 상태는 필요 없다. ref는 WAL이 들고 있다.
-        self._discard(st.segment_id)
+        st.object_verified = True
+        # 아직 ref가 WAL에 없으므로 상태를 지우면 안 된다. 완료 사실을 먼저 durable하게
+        # 남기고 persist_reference()가 WAL fsync 뒤 정리한다.
+        self._save(st)
         return st
 
     def abort(self, st: UploadState) -> bool:

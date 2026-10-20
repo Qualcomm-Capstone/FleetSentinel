@@ -28,7 +28,10 @@ import org.springframework.grpc.server.service.GrpcService;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.UploadPartPresignRequest;
 
@@ -173,17 +176,33 @@ public class SegmentUploadService
                 .toList();
 
         try {
-            s3.completeMultipartUpload(b -> b
-                    .bucket(props.getBucket())
-                    .key(key)
-                    .uploadId(req.getUploadId())
-                    .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build()));
+            try {
+                s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                        .bucket(props.getBucket())
+                        .key(key)
+                        .uploadId(req.getUploadId())
+                        .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build())
+                        .build());
+            } catch (S3Exception e) {
+                if (!isNoSuchUpload(e)) {
+                    throw e;
+                }
+                // Complete는 서버에서 성공했지만 응답을 받기 전에 차량이 죽을 수 있다.
+                // multipart는 이미 사라졌으므로 재호출은 NoSuchUpload다. 최종 키의 객체를
+                // 다시 검증해 같은 성공 응답을 돌려 Complete를 멱등하게 만든다.
+                log.info("완료 재확인: vehicle={} segment={} upload={} — 최종 객체 검증",
+                        identity.vehicleId(), req.getSegmentId(), req.getUploadId());
+            }
 
-            var head = s3.headObject(b -> b.bucket(props.getBucket()).key(key));
+            var head = s3.headObject(HeadObjectRequest.builder()
+                    .bucket(props.getBucket()).key(key).build());
             String expected = head.metadata().get("sha256");
             String actual = sha256Of(key);
 
-            boolean verified = expected != null && expected.equalsIgnoreCase(actual);
+            boolean verified = expected != null
+                    && expected.equalsIgnoreCase(actual)
+                    && identity.vehicleId().equals(head.metadata().get("vehicle-id"))
+                    && req.getSegmentId().equals(head.metadata().get("segment-id"));
             if (!verified) {
                 // 검증 실패한 객체를 남겨두면 카탈로그에 없는 쓰레기가 된다.
                 checksumMismatch.increment();
@@ -315,6 +334,11 @@ public class SegmentUploadService
      */
     private String keyFor(String vehicleId, String segmentId, long tStartUs) {
         return SegmentKey.of(props.getKeyPrefix(), vehicleId, segmentId, tStartUs);
+    }
+
+    private static boolean isNoSuchUpload(S3Exception e) {
+        return e.awsErrorDetails() != null
+                && "NoSuchUpload".equals(e.awsErrorDetails().errorCode());
     }
 
     /** 객체를 다시 읽어 sha256을 계산한다. 스트리밍이라 메모리에 전체를 올리지 않는다. */
