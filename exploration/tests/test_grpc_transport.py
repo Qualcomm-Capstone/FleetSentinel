@@ -9,6 +9,7 @@ kind 매핑이 정확한가, ack 핸들러 없이 스트림을 열지 않는가,
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
 from fleetsentinel_ingest.grpc_transport import (
     KIND_PERCEPTION,
@@ -141,3 +142,103 @@ class TestAckHandlerRequired:
         t._started = True  # start()를 우회해 send()의 검사만 본다
         with pytest.raises(ValueError, match="매핑되지 않은 WAL kind"):
             t.send("01JBOOT", 0, 99, b"x")
+
+    def test_new_stream_replays_only_unacknowledged_pending_records(self):
+        seen: list[int] = []
+        t = self._transport(on_ack=seen.append)
+        t._started = True
+        t._boot_id = "01JBOOT"
+        for seq in range(3):
+            t.send("01JBOOT", seq, 0, f"r{seq}".encode())
+
+        t._stream_generation = 1
+        first = t._drain_pending(1)
+        assert [next(first).seq for _ in range(3)] == [0, 1, 2]
+
+        assert t._pump_acks([SimpleNamespace(ack_seq=1)]) is False
+        assert seen == [1]
+        assert list(t._pending) == [2]
+
+        t._stream_generation = 2
+        replay = t._drain_pending(2)
+        assert next(replay).seq == 2
+        t.close(timeout=0)
+
+    def test_same_stream_sends_late_lower_sequence_that_closes_a_gap(self):
+        t = self._transport(on_ack=lambda _: None)
+        t._started = True
+        t._boot_id = "01JBOOT"
+        for seq in (100, 101, 103):
+            t.send("01JBOOT", seq, 0, b"x")
+
+        t._stream_generation = 1
+        stream = t._drain_pending(1)
+        assert [next(stream).seq for _ in range(3)] == [100, 101, 103]
+        t.send("01JBOOT", 102, 0, b"x")
+        assert next(stream).seq == 102
+        t.close(timeout=0)
+
+    def test_cack_removes_late_lower_sequence_after_a_higher_pending_sequence(self):
+        t = self._transport(on_ack=lambda _: None)
+        t._started = True
+        t._boot_id = "01JBOOT"
+        for seq in (100, 103, 102):
+            t.send("01JBOOT", seq, 0, b"x")
+        t._pump_acks([SimpleNamespace(ack_seq=102)])
+        assert list(t._pending) == [103]
+        t.close(timeout=0)
+
+    def test_failed_ack_callback_keeps_records_for_replay(self):
+        def failed_ack(_seq):
+            raise OSError("WAL commit failed")
+
+        t = self._transport(on_ack=failed_ack)
+        t._started = True
+        t._boot_id = "01JBOOT"
+        t.send("01JBOOT", 0, 0, b"x")
+        t._pump_acks([SimpleNamespace(ack_seq=0)])
+        assert list(t._pending) == [0]
+        assert t.stats.last_ack == -1
+        assert "WAL commit failed" in t.stats.terminal_error
+        t.close(timeout=0)
+
+    def test_queue_size_must_be_positive(self):
+        with pytest.raises(ValueError, match="queue_size"):
+            self._transport(queue_size=0)
+
+    def test_supervisor_reopens_rpc_and_replays_unacknowledged_record(self, monkeypatch):
+        import grpc
+        import threading
+
+        acked = threading.Event()
+        t = self._transport(on_ack=lambda _: acked.set())
+        requests = []
+        attempts = []
+
+        class Unavailable(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "connection lost before CACK"
+
+        class Stub:
+            def Stream(self, records, **_kwargs):
+                attempts.append(True)
+                requests.append(next(records).seq)
+                if len(attempts) == 1:
+                    raise Unavailable()
+                yield SimpleNamespace(ack_seq=0)
+                t._closed.wait(2)
+
+        t._stub = Stub()
+        monkeypatch.setattr(t, "_recreate_channel", lambda: None)
+        try:
+            t.send("01JBOOT", 0, 0, b"durable-record")
+            assert acked.wait(3), "supervisor did not reopen the failed RPC"
+        finally:
+            t.close(timeout=3)
+        assert requests == [0, 0]
+        assert t.stats.reconnect_attempts == 1
+        assert t.stats.wire_sent == 2
+        assert list(t._pending) == []

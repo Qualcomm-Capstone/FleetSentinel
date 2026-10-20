@@ -24,9 +24,9 @@
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Empty, Queue
 from typing import Callable, Iterator, Optional
 
 import grpc
@@ -57,14 +57,14 @@ _KIND_TO_WIRE = {
 #: WalShipper의 `max_inflight`가 먼저 걸리는 것이 정상이고, 이건 마지막 방어선이다.
 DEFAULT_QUEUE_SIZE = 8192
 
-_SENTINEL = object()
-
-
 @dataclass(slots=True)
 class TransportStats:
     sent: int = 0
+    wire_sent: int = 0
     acks_received: int = 0
     last_ack: int = -1
+    reconnect_attempts: int = 0
+    reconnects: int = 0
     #: 게이트웨이가 스트림을 끊은 이유. 정상 종료면 None
     terminal_error: Optional[str] = field(default=None)
 
@@ -111,19 +111,28 @@ class GrpcTransport:
         server_name: Optional[str] = None,
         queue_size: int = DEFAULT_QUEUE_SIZE,
     ) -> None:
+        if queue_size <= 0:
+            raise ValueError("queue_size must be positive")
         options = []
         if server_name:
             options.append(("grpc.ssl_target_name_override", server_name))
 
         self._channel = grpc.secure_channel(target, credentials, options=options)
         self._stub = ingest_pb2_grpc.IngestStub(self._channel)
+        self._target = target
+        self._credentials = credentials
+        self._options = options
         self._vehicle_id = vehicle_id
         self._on_ack: Optional[Callable[[int], None]] = on_ack
-        self._queue: Queue = Queue(maxsize=queue_size)
+        self._queue_size = queue_size
+        self._pending: OrderedDict[int, ingest_pb2.IngestRecord] = OrderedDict()
+        self._condition = threading.Condition()
         self._stats = TransportStats()
         self._ack_thread: Optional[threading.Thread] = None
         self._started = False
         self._closed = threading.Event()
+        self._boot_id: Optional[str] = None
+        self._stream_generation = 0
         # 우리가 부른 close()로 채널이 닫히면 ack 리더가 CANCELLED를 본다. 그걸
         # terminal_error로 기록하면 **진짜 원인을 덮는다** — 호출부가 stall을 감지해
         # 닫았는데 보고는 "Channel closed"가 되어버린다.
@@ -155,83 +164,149 @@ class GrpcTransport:
             # ack을 버리면 WAL 커밋이 영영 전진하지 않고 디스크가 찬다. 조용히 두지 않는다.
             raise RuntimeError("ack 핸들러가 없다 — set_ack_handler()를 먼저 부른다")
         self._started = True
+        self._boot_id = boot_id
 
-        metadata = (
-            ("x-vehicle-id", self._vehicle_id),
-            ("x-boot-id", boot_id),
-        )
-        responses = self._stub.Stream(self._drain_queue(), metadata=metadata)
-
-        # ack 수신은 별도 스레드다. 이 루프가 멈추면 커밋이 전진하지 않고 WAL이 자란다.
+        # 스트림 종료는 channel 연결 복구와 별개다. 감독 스레드가 새 RPC를 만들고,
+        # CACK되지 않은 pending 레코드를 다시 흘려 at-least-once를 유지한다.
         self._ack_thread = threading.Thread(
-            target=self._pump_acks, args=(responses,), name="cack-reader", daemon=True
+            target=self._supervise_stream, name="cack-reader", daemon=True
         )
         self._ack_thread.start()
 
     def send(self, boot_id: str, seq: int, kind: int, payload: bytes) -> None:
         """:class:`~.shipping.Transport` 구현. 큐가 차면 블록된다(역압)."""
-        if not self._started:
-            self.start(boot_id)
         wire_kind = _KIND_TO_WIRE.get(kind)
         if wire_kind is None:
             # 조용히 UNSPECIFIED로 보내면 게이트웨이가 거절하고 그 레코드만 사라진다.
-            # 여기서 터뜨리는 편이 낫다.
+            # 스트림을 열기 전에 검증해 잘못된 입력이 네트워크 상태를 만들지 않게 한다.
             raise ValueError(f"매핑되지 않은 WAL kind: {kind}")
+        if not self._started:
+            self.start(boot_id)
+        elif self._boot_id is not None and boot_id != self._boot_id:
+            raise RuntimeError("하나의 transport에서 boot_id를 바꿀 수 없다")
 
-        self._queue.put(
-            ingest_pb2.IngestRecord(seq=seq, kind=wire_kind, payload=payload)
-        )
+        record = ingest_pb2.IngestRecord(seq=seq, kind=wire_kind, payload=payload)
+        with self._condition:
+            while len(self._pending) >= self._queue_size and not self._closed.is_set():
+                self._condition.wait(timeout=0.1)
+            if self._closed.is_set():
+                raise RuntimeError("닫힌 transport에는 전송할 수 없다")
+            self._pending[seq] = record
+            self._condition.notify_all()
         self._stats.sent += 1
 
-    def _drain_queue(self) -> Iterator[ingest_pb2.IngestRecord]:
-        """큐를 요청 스트림으로 흘린다. gRPC가 이 제너레이터를 자체 스레드에서 돈다."""
-        while True:
-            try:
-                item = self._queue.get(timeout=0.1)
-            except Empty:
-                if self._closed.is_set():
-                    return
-                continue
-            if item is _SENTINEL:
-                return
-            yield item
+    def _drain_pending(self, generation: int) -> Iterator[ingest_pb2.IngestRecord]:
+        """현재 RPC에서 pending 레코드를 순서대로 한 번씩 흘린다.
 
-    def _pump_acks(self, responses) -> None:
+        새 RPC는 로컬 cursor를 처음부터 다시 시작하므로 CACK되지 않은 레코드가 재전송된다.
+        이전 RPC의 request iterator는 generation이 바뀌면 즉시 종료한다.
+        """
+        sent: set[int] = set()
+        while not self._closed.is_set():
+            with self._condition:
+                if generation != self._stream_generation:
+                    return
+                # CACK으로 pending에서 제거된 seq는 local set에서도 버려 크기를 제한한다.
+                sent.intersection_update(self._pending)
+                item = next(
+                    ((seq, rec) for seq, rec in self._pending.items() if seq not in sent),
+                    None,
+                )
+                if item is None:
+                    self._condition.wait(timeout=0.1)
+                    continue
+            seq, record = item
+            sent.add(seq)
+            self._stats.wire_sent += 1
+            yield record
+
+    def _recreate_channel(self) -> None:
+        self._channel.close()
+        self._channel = grpc.secure_channel(
+            self._target, self._credentials, options=self._options
+        )
+        self._stub = ingest_pb2_grpc.IngestStub(self._channel)
+
+    def _supervise_stream(self) -> None:
+        backoff = 0.1
+        first = True
+        while not self._closing:
+            if not first:
+                self._stats.reconnect_attempts += 1
+                if self._closed.wait(backoff):
+                    return
+                self._recreate_channel()
+                backoff = min(backoff * 2, 2.0)
+            first = False
+            with self._condition:
+                self._stream_generation += 1
+                generation = self._stream_generation
+                self._condition.notify_all()
+            assert self._boot_id is not None
+            metadata = (
+                ("x-vehicle-id", self._vehicle_id),
+                ("x-boot-id", self._boot_id),
+            )
+            try:
+                responses = self._stub.Stream(
+                    self._drain_pending(generation),
+                    metadata=metadata,
+                    wait_for_ready=True,
+                )
+            except grpc.RpcError as e:
+                if not self._closing:
+                    self._stats.terminal_error = f"{e.code().name}: {e.details()}"
+                continue
+            if self._pump_acks(responses):
+                return
+            if self._stats.last_ack >= 0:
+                self._stats.reconnects += 1
+                backoff = 0.1
+
+    def _pump_acks(self, responses) -> bool:
         try:
             for ack in responses:
-                self._stats.acks_received += 1
-                self._stats.last_ack = ack.ack_seq
-                # WAL 커밋을 전진시킨다 → 세그먼트가 회수된다.
+                # 콜백이 실패하면 pending을 보존해 다음 RPC에서도 재전송할 수 있게 한다.
                 if self._on_ack is not None:
                     self._on_ack(ack.ack_seq)
+                self._stats.acks_received += 1
+                self._stats.last_ack = ack.ack_seq
+                with self._condition:
+                    for seq in list(self._pending):
+                        if seq <= ack.ack_seq:
+                            self._pending.pop(seq, None)
+                    self._condition.notify_all()
+            return self._closing
         except grpc.RpcError as e:
             # 셀룰러 단절은 정상이다. 재연결하면 committed+1부터 다시 보낸다.
             if not self._closing:
                 self._stats.terminal_error = f"{e.code().name}: {e.details()}"
+            return self._closing
         except Exception as e:  # noqa: BLE001
             # RpcError가 아닌 것으로 리더가 죽으면 ack이 영영 안 온다. 조용히 스레드만
             # 사라지면 호출부는 terminal_error=None을 보고 stall로 오해한다.
             if not self._closing:
                 self._stats.terminal_error = f"ack 리더 비정상 종료: {e!r}"
-        finally:
-            self._closed.set()
+            return self._closing
 
     def close(self, timeout: float = 30.0) -> None:
-        """half-close 하고 남은 ack을 기다린다.
+        """재연결을 중지하고 채널과 ACK 리더를 닫는다.
 
-        기다리는 이유는 게이트웨이가 in-flight 쓰기를 마친 뒤 마지막 CACK을 보내기
-        때문이다. 여기서 안 기다리면 그 구간의 커밋이 전진하지 않고 다음 연결에서
-        통째로 재전송된다 — 유실은 아니지만 낭비다.
+        아직 CACK되지 않은 레코드는 WAL에 남아 다음 전송기에서 재전송된다.
+        채널을 즉시 닫으므로 graceful drain이나 마지막 ACK 수신을 보장하지 않는다.
         """
         if not self._started:
+            self._closed.set()
             self._channel.close()
             return
         self._closing = True
-        self._queue.put(_SENTINEL)
+        self._closed.set()
+        with self._condition:
+            self._stream_generation += 1
+            self._condition.notify_all()
+        self._channel.close()
         if self._ack_thread is not None:
             self._ack_thread.join(timeout=timeout)
-        self._closed.set()
-        self._channel.close()
 
     def __enter__(self) -> "GrpcTransport":
         return self
