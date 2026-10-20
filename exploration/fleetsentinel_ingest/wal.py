@@ -49,6 +49,9 @@ KIND_SEGMENT_REF = 1
 SEGMENT_SUFFIX = ".seg"
 COMMIT_FILE = "COMMIT"
 BOOT_FILE = "BOOT"
+DROPPED_FILE = "DROPPED"
+DROPPED_BODY = struct.Struct("<QQ")
+DROPPED_RECORD = struct.Struct("<QQI")
 
 # 기본값. 재생기용이라 설계 문서(64MB / 10ms)보다 작게 잡아 테스트가 빠르다.
 DEFAULT_SEGMENT_BYTES = 4 * 1024 * 1024
@@ -126,7 +129,8 @@ class Wal:
         self._last_sync = time.monotonic()
         self._fsync_count = 0
         self._appended = 0
-        self._dropped: list[tuple[int, int]] = []
+        self._dropped = self._recover_dropped()
+        self._apply_dropped_ranges()
 
         self._next_seq = self._recover()
         self._open_segment(self._next_seq)
@@ -266,7 +270,7 @@ class Wal:
         앞지를 수 있다. 그때 `seq`를 재사용하면 **하류 dedup이 새 레코드를 중복으로 버린다**.
         유실보다 나쁜 실패다 — 결번이 없어서 탐지되지 않는다.
         """
-        floor = self.committed_seq + 1
+        floor = max(self.committed_seq + 1, max((hi + 1 for _, hi in self._dropped), default=0))
         segments = self._segments()
         if not segments:
             return floor
@@ -289,6 +293,57 @@ class Wal:
             if seqs:
                 return max(seqs[-1] + 1, floor)
         return floor
+
+    def _recover_dropped(self) -> list[tuple[int, int]]:
+        """용량 제한으로 삭제한 seq 범위를 복구하고 찢어진 journal 꼬리를 제거한다."""
+        path = self.root / DROPPED_FILE
+        if not path.exists():
+            return []
+        raw = path.read_bytes()
+        ranges: list[tuple[int, int]] = []
+        valid_end = 0
+        for offset in range(0, len(raw), DROPPED_RECORD.size):
+            frame = raw[offset : offset + DROPPED_RECORD.size]
+            if len(frame) != DROPPED_RECORD.size:
+                break
+            lo, hi, expected_crc = DROPPED_RECORD.unpack(frame)
+            body = DROPPED_BODY.pack(lo, hi)
+            if zlib.crc32(body) & 0xFFFFFFFF != expected_crc or lo > hi:
+                break
+            ranges.append((lo, hi))
+            valid_end = offset + DROPPED_RECORD.size
+        if valid_end != len(raw):
+            with open(path, "r+b") as f:
+                f.truncate(valid_end)
+                os.fsync(f.fileno())
+        return ranges
+
+    def _record_dropped(self, lo: int, hi: int) -> None:
+        """삭제 의도를 먼저 durable하게 기록한다. 재시작 시 삭제를 redo할 수 있다."""
+        body = DROPPED_BODY.pack(lo, hi)
+        frame = DROPPED_RECORD.pack(lo, hi, zlib.crc32(body) & 0xFFFFFFFF)
+        with open(self.root / DROPPED_FILE, "ab") as f:
+            f.write(frame)
+            f.flush()
+            os.fsync(f.fileno())
+        # 최초 journal 생성의 디렉터리 엔트리도 삭제 대상 세그먼트보다 먼저 보존한다.
+        directory_fd = os.open(self.root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        self._dropped.append((lo, hi))
+
+    def _apply_dropped_ranges(self) -> None:
+        """journal 기록 뒤 unlink 전에 죽은 경우 삭제 작업을 재실행한다."""
+        if not self._dropped:
+            return
+        for path in self._segments():
+            seqs = [r.seq for r in _scan_segment(path)]
+            if not seqs:
+                continue
+            if any(lo <= seqs[0] and seqs[-1] <= hi for lo, hi in self._dropped):
+                path.unlink()
 
     # ── 세그먼트 관리 ───────────────────────────────────────────────────
 
@@ -323,8 +378,8 @@ class Wal:
             victim = segments[0]
             seqs = [r.seq for r in _scan_segment(victim)]
             if seqs:
-                # 버린 구간을 기록해 나중에 대사할 수 있게 한다 — 탐지 가능한 유실.
-                self._dropped.append((seqs[0], seqs[-1]))
+                # journal fsync가 unlink보다 먼저다. 중간에 죽으면 복구에서 삭제를 redo한다.
+                self._record_dropped(seqs[0], seqs[-1])
             victim.unlink()
 
     def _disk_bytes(self) -> int:

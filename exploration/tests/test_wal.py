@@ -24,6 +24,7 @@ from fleetsentinel_ingest.wal import (
     KIND_SEGMENT_REF,
     KIND_SIGNAL,
     Wal,
+    _scan_segment,
 )
 
 
@@ -131,6 +132,53 @@ def test_disk_cap_drops_oldest_and_records_the_gap(tmp_path: Path) -> None:
     dropped_hi = max(hi for _, hi in stats.dropped_seq_ranges)
     assert dropped_hi < 299  # 최신은 남는다
     wal.close()
+
+    with Wal(tmp_path, segment_bytes=256, max_disk_bytes=1024) as reopened:
+        assert reopened.stats().dropped_seq_ranges == stats.dropped_seq_ranges
+
+
+def test_dropped_journal_recovers_from_torn_tail(tmp_path: Path) -> None:
+    with Wal(tmp_path, segment_bytes=256, max_disk_bytes=1024) as wal:
+        for i in range(300):
+            wal.append(f"record-{i:04d}".encode())
+        expected = wal.stats().dropped_seq_ranges
+    journal = tmp_path / "DROPPED"
+    valid_size = journal.stat().st_size
+    with journal.open("ab") as f:
+        f.write(b"torn")
+
+    with Wal(tmp_path, segment_bytes=256, max_disk_bytes=1024) as reopened:
+        assert reopened.stats().dropped_seq_ranges == expected
+    assert journal.stat().st_size == valid_size
+
+
+def test_dropped_journal_redoes_unlink_after_crash_boundary(tmp_path: Path) -> None:
+    wal = Wal(tmp_path, segment_bytes=128)
+    for i in range(100):
+        wal.append(f"record-{i:04d}".encode())
+    wal.flush()
+    victim = wal._segments()[0]
+    seqs = [r.seq for r in _scan_segment(victim)]
+    wal._record_dropped(seqs[0], seqs[-1])
+    wal.close()
+    assert victim.exists(), "journal과 unlink 사이의 crash 경계를 만든다"
+
+    with Wal(tmp_path, segment_bytes=128) as reopened:
+        assert not victim.exists()
+        assert reopened.stats().dropped_seq_ranges == [(seqs[0], seqs[-1])]
+
+
+def test_recovery_does_not_reuse_sequences_from_discarded_segments(tmp_path: Path) -> None:
+    wal = Wal(tmp_path, segment_bytes=128)
+    for i in range(10):
+        wal.append(f"record-{i:04d}".encode())
+    wal.flush()
+    # Deletion intent covers all retained records at this crash boundary.
+    wal._record_dropped(0, 9)
+    wal.close()
+
+    with Wal(tmp_path, segment_bytes=128) as reopened:
+        assert reopened.append(b"new") == 10
 
 
 def test_stats_reports_pending_backlog(tmp_path: Path) -> None:
