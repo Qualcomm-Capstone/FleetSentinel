@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+import urllib.parse
 import uuid
 from confluent_kafka import Producer
 from fastavro import schemaless_writer
@@ -19,15 +20,22 @@ def get(path): return json.load(urllib.request.urlopen('http://localhost:8081'+p
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--out',type=Path,required=True)
-    out=parser.parse_args().out
+    parser.add_argument('--api-url',default='http://127.0.0.1:8080')
+    args=parser.parse_args()
+    out=args.out
     out.mkdir(parents=True,exist_ok=False)
-    job=next(j['jid'] for j in get('/jobs/overview')['jobs'] if j['state']=='RUNNING')
+    jobs = [j['jid'] for j in get('/jobs/overview')['jobs']
+            if j['state'] == 'RUNNING' and j['name'] == 'fleetsentinel-alerts']
+    if len(jobs) != 1:
+        raise RuntimeError(f'expected exactly one running alert job, got {jobs}')
+    job = jobs[0]
     run='recovery-'+uuid.uuid4().hex[:8]
     schema=json.loads(Path('schemas/vehicle-signal.avsc').read_text())
     producer=Producer({'bootstrap.servers':'localhost:29092','acks':'all','broker.address.family':'v4'})
     events=[]
     def listen():
-        with urllib.request.urlopen('http://localhost:8080/api/alerts',timeout=180) as response:
+        query = urllib.parse.urlencode({'vehicle': run})
+        with urllib.request.urlopen(args.api_url+'/api/alerts?'+query,timeout=180) as response:
             for line in response:
                 if line.startswith(b'data:'):
                     e=json.loads(line[5:])
@@ -54,7 +62,8 @@ def main():
         time.sleep(.5)
     else:raise RuntimeError('checkpoint after initial state absent')
     began=time.time_ns()//1_000_000
-    subprocess.run(['docker','restart','fleet-taskmanager'],check=True,stdout=subprocess.PIPE)
+    subprocess.run(['docker','compose','-f','infra/docker-compose.yml','restart','taskmanager'],
+                   check=True,stdout=subprocess.PIPE)
     history=[];deadline=time.monotonic()+120
     while time.monotonic()<deadline:
         current=get(f'/jobs/{job}/checkpoints')

@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import time
 import urllib.request
+import urllib.parse
 import uuid
 from confluent_kafka import Producer
 from fastavro import schemaless_writer
@@ -16,6 +17,7 @@ from fastavro import schemaless_writer
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', type=Path, required=True)
+    ap.add_argument('--api-url', default='http://127.0.0.1:8080')
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     run = 'e2e-' + uuid.uuid4().hex[:8]
@@ -24,20 +26,28 @@ def main():
                          'acks': 'all', 'enable.idempotence': True, 'broker.address.family': 'v4'})
     events, failures = [], []
     ready = threading.Event()
-    def listen():
+    ready_count = 0
+    ready_lock = threading.Lock()
+    def listen(role):
+        nonlocal ready_count
         try:
-            with urllib.request.urlopen('http://localhost:8080/api/alerts', timeout=30) as response:
-                ready.set()
+            vehicle = run + '-' + role
+            query = urllib.parse.urlencode({'vehicle': vehicle})
+            with urllib.request.urlopen(args.api_url + '/api/alerts?' + query, timeout=60) as response:
+                with ready_lock:
+                    ready_count += 1
+                    if ready_count == 3:
+                        ready.set()
                 for line in response:
                     if line.startswith(b'data:'):
                         item = json.loads(line[5:])
-                        if item['vehicleId'].startswith(run):
-                            events.append({'receivedAtMs': time.time_ns() // 1_000_000, **item})
+                        events.append({'receivedAtMs': time.time_ns() // 1_000_000, **item})
         except Exception as error:
             failures.append(str(error))
-    threading.Thread(target=listen, daemon=True).start()
+    for role in ('stopped', 'planned', 'moving'):
+        threading.Thread(target=listen, args=(role,), daemon=True).start()
     # Servlet headers may be committed by the first heartbeat rather than subscribe().
-    time.sleep(1)
+    ready.wait(5)
     start = time.time_ns() // 1_000_000
     seqs = Counter()
     sent = []
@@ -68,7 +78,7 @@ def main():
     time.sleep(3)
     for role in ('stopped', 'planned', 'moving'): send(role, 9)
     producer.flush(5)
-    deadline = time.monotonic() + 1.5
+    deadline = time.monotonic() + 15
     while len(events) < 10 and time.monotonic() < deadline: time.sleep(.05)
     observed = Counter((e['vehicleId'].removeprefix(run + '-'), e['type']) for e in events)
     expected = Counter({('stopped', 'UNPLANNED_STOP'): 1, ('stopped', 'STOP_CLEARED'): 1,

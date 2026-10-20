@@ -1,6 +1,7 @@
 # FleetSentinel — 로컬 인프라 실행 절차
 
-> Kafka→Flink→ClickHouse 적재와 Flink→Kafka→API→SSE 알림 경로까지 구현돼 있다.
+> Kafka에서 독립적으로 읽는 ClickHouse 적재 Job과 알림 Job을 구현했다.
+> 두 Job은 consumer group과 checkpoint를 공유하지 않는다.
 > 실제 차량 대신 nuScenes 재생기를 사용하므로 실차량 라이브 관제는 아니다.
 >
 > 데이터 설계는 [`docs/data-design.md`](docs/data-design.md), 전체 설계는
@@ -81,13 +82,25 @@ make api
 make flink-submit ODD_BOUNDS='singapore-onenorth=1.2983,1.2987,103.7883,103.7885;boston-seaport=42.3445,42.3518,-71.0507,-71.0341'
 ```
 
+제출 뒤 Flink UI에는 두 Job이 보여야 한다.
+
+- `fleetsentinel-alerts`: `fleetsentinel-alerts` consumer group으로 읽고 `fleet.alerts`에 기록한다.
+- `fleetsentinel-storage`: `fleetsentinel-storage` consumer group으로 읽고 ClickHouse에 적재한다.
+
+ClickHouse가 멈추면 storage Job의 lag와 checkpoint만 영향을 받아야 한다. alert Job 실행 그래프에는
+ClickHouse sink가 없으므로 저장 장애의 backpressure가 알림 판정까지 전파되지 않는다.
+다만 두 Job은 같은 세션 클러스터의 CPU·메모리와 Kafka를 공유하므로 호스트 장애나 자원 고갈까지
+격리되는 것은 아니다. 기존 단일 Job을 사용했다면 먼저 중지한 뒤 두 Job을 제출한다.
+새 consumer group은 보존된 로그의 처음부터 읽는다. 재배포 시 연산자 상태까지 이어가려면
+각 Job의 checkpoint/savepoint에서 별도로 복원해야 하며, Kafka 커밋 offset만으로는 상태가 복원되지 않는다.
+
 대시보드를 실 API에 연결한다.
 
 ```bash
 make dashboard
 ```
 
-알림 경로는 `Flink → fleet.alerts → Spring API → /api/alerts SSE → React`다.
+알림 경로는 `Flink alert Job → fleet.alerts → Spring API → /api/alerts SSE → React`다.
 `/api/stream`은 ClickHouse의 텔레메트리 재생 전용이라 알림 전달에 사용하지 않는다.
 
 ## 트러블슈팅
@@ -126,9 +139,23 @@ npm run dev        # Vite + 목업 SSE 스트림
 
 ## 다음 단계
 
-`scripts/verify-realtime.py`, `scripts/verify-steady.py`, `scripts/verify-recovery.py`로
+`scripts/verify-realtime.py`, `scripts/flink_validation/run_campaign.py`,
+`scripts/verify-recovery.py`로
 알림 전달, 고정 유입 처리, TaskManager 복구를 검증할 수 있다. 실행 결과는 로컬의
 `evidence/` 아래에 저장하며 저장소에는 올리지 않는다.
+
+Flink 정상/ClickHouse 10초 장애 캠페인은 검증 전용 Prometheus를 함께 실행한다.
+`data/nuscenes`의 mini 데이터·CAN bus 데이터와 `exploration/setup-venv.sh`로 설치한 의존성이 필요하다.
+기본 API 주소는 `http://127.0.0.1:8080`이며 다른 포트는 `--api-url`로 지정한다.
+이 테스트는 Kafka에 레코드를 쓰고 ClickHouse를 일시 정지하므로 전용 로컬 개발 스택에서만 실행한다.
+실행 전 두 Job의 checkpoint가 각각 5회 이상 완료되고 consumer lag가 0이어야 한다.
+
+```bash
+docker compose -f infra/docker-compose.yml --profile validation up -d --wait prometheus-flink
+cd exploration
+PYTHONPATH=. .venv/bin/python ../scripts/flink_validation/run_campaign.py \
+  --out ../evidence/flink-split-$(date +%Y%m%d-%H%M%S) --metrics-bind 0.0.0.0
+```
 
 각 스크립트에 `--out evidence/<새 실행 이름>`을 지정한다. 알림 시나리오 검증은
 Flink 잡을 `--stop-after-ms 3000 --monitor-stale-ms 2000`으로 제출해야 한다.
