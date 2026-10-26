@@ -79,7 +79,7 @@ gateway: ## 게이트웨이 기동 (gRPC 9090 mTLS · 관리 HTTP 8082)
 	$(GRADLE) :gateway:bootJar
 	FLEETSENTINEL_PKI=$(PKI) \
 	KAFKA_BOOTSTRAP=localhost:29092,localhost:29093,localhost:29094 \
-	$(JAVA21)/bin/java -jar gateway/build/libs/gateway-0.1.0.jar
+	$(JAVA21)/bin/java -jar gateway/build/libs/gateway-0.1.0.jar --spring.profiles.active=local
 
 ship: ## nuScenes 신호·객체 메타데이터 → WAL → 게이트웨이 → Kafka 종단 재생
 	cd exploration && PYTHONPATH=. .venv/bin/python scripts/ship_to_gateway.py \

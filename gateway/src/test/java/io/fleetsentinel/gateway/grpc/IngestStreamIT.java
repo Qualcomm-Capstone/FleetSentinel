@@ -35,6 +35,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -43,6 +44,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.kafka.test.context.EmbeddedKafka;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.annotation.DirtiesContext;
 
 /**
  * 종단 검증 — 실제 mTLS 핸드셰이크 + 실제 Kafka 쓰기.
@@ -54,13 +56,15 @@ import org.springframework.test.context.DynamicPropertySource;
  * "테스트는 통과하는데 운영에서 안 되는" 차이가 생긴다.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @EmbeddedKafka(
         partitions = 1,
         topics = {"telemetry.records", "telemetry.dlq"},
         bootstrapServersProperty = "spring.kafka.bootstrap-servers")
 class IngestStreamIT {
 
-    private static final int GRPC_PORT = 19090;
+    @Value("${local.grpc.port}")
+    private int grpcPort;
     /** 계층 셋이 한 토픽으로 간다. */
     private static final String TOPIC = "telemetry.records";
     private static final Path PKI = TestPki.generate();
@@ -72,7 +76,7 @@ class IngestStreamIT {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
-        registry.add("spring.grpc.server.port", () -> GRPC_PORT);
+        registry.add("spring.grpc.server.port", () -> 0);
         registry.add("spring.grpc.server.ssl.enabled", () -> true);
         registry.add("spring.grpc.server.ssl.bundle", () -> "gateway");
         registry.add("spring.grpc.server.ssl.client-auth", () -> "REQUIRE");
@@ -85,8 +89,11 @@ class IngestStreamIT {
     }
 
     @AfterEach
-    void closeChannels() {
+    void closeChannels() throws InterruptedException {
         channels.forEach(ManagedChannel::shutdownNow);
+        for (var channel : channels) {
+            assertThat(channel.awaitTermination(10, TimeUnit.SECONDS)).as("gRPC channel termination").isTrue();
+        }
         channels.clear();
     }
 
@@ -95,6 +102,7 @@ class IngestStreamIT {
     @Test
     @DisplayName("신호·객체 메타데이터 레코드가 Kafka에 실리고 CACK이 돌아온다")
     void publishesAndAcks() throws Exception {
+        // Given
         var stub = stubFor("vehicle-0001", "vehicle-0001", "01JBOOTA");
 
         var acks = new CopyOnWriteArrayList<Long>();
@@ -119,6 +127,7 @@ class IngestStreamIT {
             }
         });
 
+        // When
         for (long seq = 0; seq < 200; seq++) {
             out.onNext(IngestRecord.newBuilder()
                     .setSeq(seq)
@@ -128,6 +137,7 @@ class IngestStreamIT {
         }
         out.onCompleted();
 
+        // Then
         assertThat(done.await(60, TimeUnit.SECONDS)).isTrue();
         assertThat(error.get()).isNull();
 
@@ -142,9 +152,12 @@ class IngestStreamIT {
     @Test
     @DisplayName("파티션 키는 인증서에서 나온 vehicle_id다 — 페이로드가 아니라")
     void partitionKeyComesFromCertificate() throws Exception {
+        // Given
         var stub = stubFor("vehicle-0002", "vehicle-0002", "01JBOOTB");
+        // When
         sendOne(stub, 0, RecordKind.RECORD_KIND_SEGMENT_REF, "payload-claims-nothing");
 
+        // Then
         var records = await().atMost(Duration.ofSeconds(30))
                 .until(() -> drain("RECORD_KIND_SEGMENT_REF", "01JBOOTB"), r -> !r.isEmpty());
 
@@ -158,6 +171,7 @@ class IngestStreamIT {
     @Test
     @DisplayName("every-n 미만을 보내고 조용해져도 CACK이 온다 — 정차 중인 차량")
     void idleBurstStillGetsCack() throws Exception {
+        // Given
         // every-n=128 이므로 10건은 개수 조건을 만족하지 못한다. 시간 조건(200ms)이
         // 주기 플러시로 깨어나야만 CACK이 나간다. 스트림을 닫지 않고 기다린다 —
         // onCompleted()의 drain에 기대면 이 검사가 무의미해진다.
@@ -181,6 +195,7 @@ class IngestStreamIT {
             }
         });
 
+        // When
         for (long seq = 0; seq < 10; seq++) {
             out.onNext(IngestRecord.newBuilder()
                     .setSeq(seq)
@@ -191,6 +206,7 @@ class IngestStreamIT {
         // 스트림은 열어둔 채로 둔다 — onCompleted()의 drain에 기대면 이 검사가 무의미해진다.
         // 주기 플러시는 200ms마다 그 시점의 연속 최고 seq를 흘리므로 ack이 여러 번
         // 나뉘어 올 수 있다. 중요한 것은 **스트림을 닫지 않고도 9까지 도달**하는 것이다.
+        // Then
         await().atMost(Duration.ofSeconds(15))
                 .untilAsserted(() -> {
                     assertThat(failure.get()).isNull();
@@ -220,7 +236,7 @@ class IngestStreamIT {
     @Test
     @DisplayName("클라이언트 인증서가 없으면 연결이 서지 않는다")
     void requiresClientCertificate() {
-        var channel = NettyChannelBuilder.forAddress("localhost", GRPC_PORT)
+        var channel = NettyChannelBuilder.forAddress("localhost", grpcPort)
                 .overrideAuthority("localhost")
                 .sslContext(sslContext(null))
                 .build();
@@ -256,7 +272,7 @@ class IngestStreamIT {
 
     @Test
     @DisplayName("kind가 UNSPECIFIED면 INVALID_ARGUMENT — 조용히 한 토픽으로 몰지 않는다")
-    void rejectsUnroutableKind() {
+    void rejectsUnroutableKind() throws InterruptedException {
         var stub = stubFor("vehicle-0001", "vehicle-0001", "01JBOOTF");
         var latch = new CountDownLatch(1);
         var error = new AtomicReference<Throwable>();
@@ -267,11 +283,7 @@ class IngestStreamIT {
                 .setKind(RecordKind.RECORD_KIND_UNSPECIFIED)
                 .setPayload(ByteString.copyFromUtf8("x"))
                 .build());
-        try {
-            latch.await(30, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        assertThat(latch.await(30, TimeUnit.SECONDS)).as("gRPC rejection callback").isTrue();
 
         assertThat(error.get()).isNotNull();
         assertThat(Status.fromThrowable(error.get()).getCode())
@@ -285,7 +297,7 @@ class IngestStreamIT {
     // ── 도우미 ───────────────────────────────────────────────────────────
 
     private IngestGrpc.IngestStub stubFor(String certVehicle, String claim, String bootId) {
-        var channel = NettyChannelBuilder.forAddress("localhost", GRPC_PORT)
+        var channel = NettyChannelBuilder.forAddress("localhost", grpcPort)
                 .overrideAuthority("localhost")
                 .sslContext(sslContext(certVehicle))
                 .build();
@@ -322,14 +334,16 @@ class IngestStreamIT {
     private static void sendOne(IngestGrpc.IngestStub stub, long seq, RecordKind kind, String payload)
             throws Exception {
         var latch = new CountDownLatch(1);
-        var out = stub.stream(observer(latch, new AtomicReference<>()));
+        var error = new AtomicReference<Throwable>();
+        var out = stub.stream(observer(latch, error));
         out.onNext(IngestRecord.newBuilder()
                 .setSeq(seq)
                 .setKind(kind)
                 .setPayload(ByteString.copyFromUtf8(payload))
                 .build());
         out.onCompleted();
-        latch.await(30, TimeUnit.SECONDS);
+        assertThat(latch.await(30, TimeUnit.SECONDS)).as("gRPC completion callback").isTrue();
+        assertThat(error.get()).isNull();
     }
 
     private static Status expectFailure(IngestGrpc.IngestStub stub) {
@@ -347,9 +361,10 @@ class IngestStreamIT {
             // 스트림이 이미 닫혔다. 상태는 onError로 온다.
         }
         try {
-            latch.await(30, TimeUnit.SECONDS);
+            assertThat(latch.await(30, TimeUnit.SECONDS)).as("gRPC failure callback").isTrue();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while waiting for gRPC failure", e);
         }
         assertThat(error.get()).as("실패해야 한다").isNotNull();
         return Status.fromThrowable(error.get());
@@ -385,21 +400,31 @@ class IngestStreamIT {
     private List<ConsumerRecord<byte[], byte[]>> drain(String kind, String bootId) {
         Map<String, Object> props = new HashMap<>();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "drain-" + kind + "-" + System.nanoTime());
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
 
         var out = new ArrayList<ConsumerRecord<byte[], byte[]>>();
         try (var consumer = new KafkaConsumer<byte[], byte[]>(props)) {
-            consumer.subscribe(List.of(TOPIC));
-            // 리밸런스 + 첫 fetch를 감안해 몇 번 돌린다.
-            for (int i = 0; i < 5 && out.isEmpty(); i++) {
-                consumer.poll(Duration.ofSeconds(2)).records(TOPIC).forEach(r -> {
+            var partitions = consumer.partitionsFor(TOPIC).stream()
+                    .map(p -> new TopicPartition(TOPIC, p.partition())).toList();
+            consumer.assign(partitions);
+            consumer.seekToBeginning(partitions);
+            var endOffsets = consumer.endOffsets(partitions);
+            long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+            // 첫 fetch에 일부만 도착해도 조회 시작 시점의 끝 offset까지 수집한다.
+            while (partitions.stream().anyMatch(p -> consumer.position(p) < endOffsets.get(p))
+                    && System.nanoTime() < deadline) {
+                consumer.poll(Duration.ofMillis(250)).records(TOPIC).forEach(r -> {
                     if (bootId.equals(header(r, "boot_id")) && kind.equals(header(r, "kind"))) {
                         out.add(r);
                     }
                 });
+            }
+            for (var partition : partitions) {
+                assertThat(consumer.position(partition)).as("Kafka drain reached snapshot end")
+                        .isGreaterThanOrEqualTo(endOffsets.get(partition));
             }
         }
         return out;

@@ -39,6 +39,11 @@ spec:
             - name: mgmt
               containerPort: 8082
           env:
+            # 이 매니페스트는 함께 배포하는 MinIO를 사용한다.
+            - name: OBJECT_STORE_CREDENTIALS_MODE
+              value: static
+            - name: OBJECT_STORE_PATH_STYLE_ACCESS
+              value: "true"
             - name: KAFKA_BOOTSTRAP
               valueFrom:
                 configMapKeyRef: {name: fleet-config, key: KAFKA_BOOTSTRAP}

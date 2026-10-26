@@ -1,0 +1,7 @@
+fleetsentinel:
+  object-store:
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+    path-style-access: true
+    credentials-mode: static
+    access-key: ${MINIO_ACCESS_KEY:admin}
+    secret-key: ${MINIO_SECRET_KEY:password}

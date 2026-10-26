@@ -22,6 +22,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.HashSet;
+import java.util.regex.Pattern;
+import java.io.UncheckedIOException;
+import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
+import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.grpc.server.service.GrpcService;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -48,6 +53,8 @@ import software.amazon.awssdk.services.s3.presigner.model.UploadPartPresignReque
 @Slf4j
 public class SegmentUploadService
         extends io.fleetsentinel.gateway.proto.SegmentUploadGrpc.SegmentUploadImplBase {
+
+    private static final Pattern SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
 
     private final S3Client s3;
     private final S3Presigner presigner;
@@ -96,14 +103,14 @@ public class SegmentUploadService
             return;
         }
 
-        int partCount = (int) Math.max(1,
-                (req.getSizeBytes() + req.getPartSizeBytes() - 1) / req.getPartSizeBytes());
-        if (partCount > props.getMaxParts()) {
+        long requestedParts = 1 + (req.getSizeBytes() - 1) / req.getPartSizeBytes();
+        if (requestedParts > props.getMaxParts()) {
             out.onError(Status.INVALID_ARGUMENT.withDescription(
-                    "파트 수 " + partCount + "가 상한 " + props.getMaxParts() + "을 넘는다 — "
+                    "파트 수 " + requestedParts + "가 상한 " + props.getMaxParts() + "을 넘는다 — "
                             + "part_size_bytes를 키운다").asRuntimeException());
             return;
         }
+        int partCount = (int) requestedParts;
 
         try {
             var created = s3.createMultipartUpload(b -> b
@@ -121,7 +128,18 @@ public class SegmentUploadService
             for (int n = 1; n <= partCount; n++) {
                 numbers.add(n);
             }
-            List<PartUrl> urls = presign(key, created.uploadId(), numbers);
+            List<PartUrl> urls;
+            try {
+                urls = presign(key, created.uploadId(), numbers);
+            } catch (RuntimeException failure) {
+                // 차량에 upload_id를 전달하기 전에 실패했으므로 생성한 multipart를 정리한다.
+                try {
+                    s3.abortMultipartUpload(b -> b.bucket(props.getBucket()).key(key).uploadId(created.uploadId()));
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                throw failure;
+            }
 
             begun.increment();
             log.info("업로드 시작: vehicle={} segment={} parts={} key={}",
@@ -138,8 +156,7 @@ public class SegmentUploadService
             out.onCompleted();
         } catch (RuntimeException e) {
             log.error("업로드 시작 실패: vehicle={} key={}", identity.vehicleId(), key, e);
-            out.onError(Status.UNAVAILABLE
-                    .withDescription("object store: " + e.getMessage()).asRuntimeException());
+            out.onError(storageStatus(e).asRuntimeException());
         }
     }
 
@@ -151,14 +168,13 @@ public class SegmentUploadService
                     .withDescription("identity interceptor not applied").asRuntimeException());
             return;
         }
-        if (req.getPartsCount() == 0) {
-            out.onError(Status.INVALID_ARGUMENT
-                    .withDescription("parts가 비어 있다").asRuntimeException());
-            return;
-        }
-
         String key;
         try {
+            requireUploadId(req.getUploadId());
+            validatePartNumbers(req.getPartsList().stream().map(p -> p.getPartNumber()).toList());
+            if (req.getPartsList().stream().anyMatch(p -> p.getEtag().isBlank())) {
+                throw new IllegalArgumentException("ETag must not be blank");
+            }
             key = keyFor(identity.vehicleId(), req.getSegmentId(), req.getTStartUs());
         } catch (IllegalArgumentException e) {
             out.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asRuntimeException());
@@ -226,8 +242,7 @@ public class SegmentUploadService
         } catch (RuntimeException e) {
             log.error("업로드 완료 실패: vehicle={} segment={}",
                     identity.vehicleId(), req.getSegmentId(), e);
-            out.onError(Status.UNAVAILABLE
-                    .withDescription("object store: " + e.getMessage()).asRuntimeException());
+            out.onError(storageStatus(e).asRuntimeException());
         }
     }
 
@@ -241,14 +256,10 @@ public class SegmentUploadService
             return;
         }
         List<Integer> numbers = new ArrayList<>(req.getPartNumbersList());
-        if (numbers.isEmpty()) {
-            out.onError(Status.INVALID_ARGUMENT.withDescription(
-                    "part_numbers 가 비었다 — 차량이 남은 파트 번호를 보내야 한다")
-                    .asRuntimeException());
-            return;
-        }
         String key;
         try {
+            requireUploadId(req.getUploadId());
+            validatePartNumbers(numbers);
             key = keyFor(identity.vehicleId(), req.getSegmentId(), req.getTStartUs());
         } catch (IllegalArgumentException e) {
             out.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asRuntimeException());
@@ -266,8 +277,8 @@ public class SegmentUploadService
                     .build());
             out.onCompleted();
         } catch (RuntimeException e) {
-            out.onError(Status.UNAVAILABLE
-                    .withDescription("object store: " + e.getMessage()).asRuntimeException());
+            log.error("업로드 URL 갱신 실패: vehicle={} segment={}", identity.vehicleId(), req.getSegmentId(), e);
+            out.onError(storageStatus(e).asRuntimeException());
         }
     }
 
@@ -302,6 +313,7 @@ public class SegmentUploadService
         }
         String key;
         try {
+            requireUploadId(req.getUploadId());
             key = keyFor(identity.vehicleId(), req.getSegmentId(), req.getTStartUs());
         } catch (IllegalArgumentException e) {
             out.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asRuntimeException());
@@ -314,8 +326,8 @@ public class SegmentUploadService
             out.onNext(AbortUploadResponse.newBuilder().setAborted(true).build());
             out.onCompleted();
         } catch (RuntimeException e) {
-            out.onError(Status.UNAVAILABLE
-                    .withDescription("object store: " + e.getMessage()).asRuntimeException());
+            log.error("업로드 취소 실패: vehicle={} segment={}", identity.vehicleId(), req.getSegmentId(), e);
+            out.onError(storageStatus(e).asRuntimeException());
         }
     }
 
@@ -331,7 +343,42 @@ public class SegmentUploadService
      * 접두사로 넘어갈 수 없다 — 신원 경계는 그대로 유지된다.
      */
     private String keyFor(String vehicleId, String segmentId, long tStartUs) {
+        if (tStartUs <= 0) throw new IllegalArgumentException("t_start_us must be positive");
         return SegmentKey.of(props.getKeyPrefix(), vehicleId, segmentId, tStartUs);
+    }
+
+    private static void requireUploadId(String uploadId) {
+        if (uploadId.isBlank()) throw new IllegalArgumentException("upload_id must not be blank");
+    }
+
+    private void validatePartNumbers(List<Integer> numbers) {
+        if (numbers.isEmpty() || numbers.size() > props.getMaxParts()
+                || numbers.stream().anyMatch(n -> n < 1 || n > props.getMaxParts())
+                || new HashSet<>(numbers).size() != numbers.size()) {
+            throw new IllegalArgumentException("part numbers must be unique and within 1.." + props.getMaxParts());
+        }
+    }
+
+    private static Status storageStatus(RuntimeException error) {
+        if (error instanceof S3Exception s3Error) {
+            int code = s3Error.statusCode();
+            if (code >= 500 || code == 429 || code == 408) {
+                return Status.UNAVAILABLE.withDescription("object storage temporarily unavailable");
+            }
+            String reason = s3Error.awsErrorDetails() == null ? "" : s3Error.awsErrorDetails().errorCode();
+            if ("NoSuchUpload".equals(reason) || "NoSuchKey".equals(reason)) {
+                return Status.NOT_FOUND.withDescription("upload or object not found");
+            }
+            if ("InvalidPart".equals(reason) || "InvalidPartOrder".equals(reason) || "EntityTooSmall".equals(reason)) {
+                return Status.INVALID_ARGUMENT.withDescription("invalid uploaded parts");
+            }
+            return Status.FAILED_PRECONDITION.withDescription("object storage rejected the operation");
+        }
+        if (error instanceof ApiCallTimeoutException || error instanceof ApiCallAttemptTimeoutException
+                || error instanceof UncheckedIOException || error.getCause() instanceof java.io.IOException) {
+            return Status.UNAVAILABLE.withDescription("object storage transport failed");
+        }
+        return Status.INTERNAL.withDescription("internal upload error");
     }
 
     private static boolean isNoSuchUpload(S3Exception e) {
@@ -353,7 +400,7 @@ public class SegmentUploadService
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         } catch (java.io.IOException e) {
-            throw new RuntimeException("객체를 다시 읽지 못했다: " + key, e);
+            throw new UncheckedIOException("객체를 다시 읽지 못했다: " + key, e);
         }
     }
 
@@ -361,13 +408,16 @@ public class SegmentUploadService
         if (req.getSizeBytes() <= 0) {
             throw new IllegalArgumentException("size_bytes > 0 이어야 한다");
         }
-        if (req.getSha256().length() != 64) {
+        if (!SHA256.matcher(req.getSha256()).matches()) {
             throw new IllegalArgumentException("sha256은 hex 64자여야 한다");
         }
         if (req.getTStartUs() <= 0 || req.getTEndUs() < req.getTStartUs()) {
             throw new IllegalArgumentException("t_start_us / t_end_us 범위가 잘못됐다");
         }
         long part = req.getPartSizeBytes();
+        if (part <= 0 || part > 5L * 1024 * 1024 * 1024) {
+            throw new IllegalArgumentException("part_size_bytes must be within 1..5GiB");
+        }
         // 파트가 하나뿐이면 S3의 5 MiB 하한이 적용되지 않는다(마지막 파트는 예외).
         if (part < props.getMinPartSizeBytes() && req.getSizeBytes() > part) {
             throw new IllegalArgumentException(
