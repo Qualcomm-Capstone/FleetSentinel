@@ -45,8 +45,7 @@
       <version>${flink.version}</version>
       <scope>provided</scope>
     </dependency>
-    <!-- dedup 상태가 차량 수에 비례해 커지므로 힙이 아니라 RocksDB 에 둔다.
-         상태 크기 실측은 ack-dedup-design.md §4. -->
+    <!-- 차량·세션별 dedup 상태를 위한 RocksDB 백엔드. -->
     <dependency>
       <groupId>org.apache.flink</groupId>
       <artifactId>flink-statebackend-rocksdb</artifactId>

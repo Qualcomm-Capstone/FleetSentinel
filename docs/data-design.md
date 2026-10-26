@@ -1,367 +1,423 @@
-# FleetSentinel — 데이터 설계 (정본)
+# FleetSentinel — 데이터 구조와 해석 가이드
 
-> ## 이 문서의 역할
->
-> **데이터에 관한 모든 사실은 여기에만 적는다.** 수치·필드·제약을 다른 문서가 다시 쓰지
-> 않고 이 문서를 링크한다. 같은 사실이 두 곳에 있으면 반드시 어긋나기 때문이다.
->
-> 답하는 질문은 셋이다 — **어떤 데이터가 / 어느 규모로 / 어떤 형식으로** 들어오는가.
->
-> 저장·전송·서빙 설계는 이 문서 밖이다(§11).
+한 주행 장면에 포함된 카메라·점군·차량 신호·객체 주석의 구조와 연결 관계를 설명한다.
 
-| 항목 | 값 |
-|---|---|
-| 상태 | 실측 완료 |
-| 측정 기반 | nuScenes **v1.0-mini 10장면 전수** · 키프레임 스팬 196.5초 · 차량 1대분 |
-| 측정 재현 | **`exploration/scripts/measure_dataset.py`** (이 문서의 모든 수치) · `verify_mcap.py`(무손실) |
-| 최종 갱신 | 2026-08-28 |
-
-**표기 규약 — 단위.** 크기·대역폭은 **2진 단위**(KiB = 1,024 B, MiB = 1,024 KiB)로 통일한다.
-네트워크 대역폭은 관례상 10진(MB = 10⁶ B)으로 적는 경우가 많아 **같은 값이 4.9% 달라 보인다.**
-필요한 곳에서는 둘을 함께 적는다.
-
-**표기 규약 — 차량 수.** "차량 N대"는 항상 **동시 스트림 N개**를 뜻한다. 원천을 수집한 실제
-차량은 **2대**이므로 서로 다른 실차량 N대의 데이터는 존재하지 않는다(§3.3).
+- **데이터 구성:** [재생 화면](#1-재생-화면으로-보는-세-가지-데이터) → [nuScenes 스키마](#2-nuscenes-구조) → [데이터셋 규모](#3-원천-데이터)
+- **데이터 처리:** [필드 계약](#5-필드-계약) · [시간 계약](#6-시간-계약) · [좌표 계약](#7-좌표-계약)
+- **발생량과 검증:** [채널별 발생량](#4-채널별-발생량) · [검증 결과](#10-검증)
 
 ---
 
-## 1. 무슨 데이터인가
+## 1. 재생 화면으로 보는 세 가지 데이터
 
-자율주행 차량의 센서·차량 신호·객체 메타데이터다. 성격이 완전히 다른 **세 계층**으로 갈리고,
-이 비대칭이 시스템 설계 전체를 결정한다.
+### 1.1 카메라·점군·차량 신호 재생
 
-| 계층 | 내용 | 메시지/초 | 대역폭 |
-|---|---|---|---|
-| ① **신호** | CAN 버스, IMU, 조향, 차량 자세 | **1,307.7** | 464 KiB/s |
-| ② **객체 메타데이터** | 3D 객체 박스, 트랙, 클래스 | 94.3 객체/초 (키프레임 2.06/초) | 39 KiB/s |
-| ③ **원시 센서** | 카메라 6대 · LiDAR 1대 · 레이더 5대 | 158.8 | **25.89 MiB/s** |
+**Rerun**으로 약 20초 길이의 `scene-0061`을 재생한 화면이다.
 
-| 비교 | 중량(③) ÷ 경량(①②) |
-|---|---|
-| 대역폭 | **52.8배** |
-| 메시지 건수 | 0.113배 — **경량이 8.8배 많다** |
+![scene-0061의 Rerun 재생: 전방 카메라, LiDAR와 객체 주석, 속도와 조향 그래프](assets/data-rerun-scene-0061.png)
 
-**대역폭은 원시가 압도하는데 건수는 신호가 더 많다.** 둘을 한 경로로 처리하려는 순간
-설계가 무너진다. 이 비대칭이 [SDD](sdd.md) S-1(Claim-Check)의 근거다.
+*scene-0061 재생 화면. 위쪽은 전방 카메라와 3D 공간, 아래쪽은 속도·조향 그래프다.
+원천: nuScenes / Motional.*
+
+- **카메라:** `CAM_FRONT`의 JPEG 이미지로 도로 상황을 확인한다.
+- **점군:** LiDAR가 측정한 반사 위치를 3D 점으로 표시한다.
+- **객체 박스:** nuScenes의 3D 객체 주석으로 위치·크기·방향을 표시한다.
+- **신호 그래프:** ego_pose 시각에 가장 가까운 CAN 값을 연결해 속도·조향 변화를 표시한다.
+
+타임라인을 이동하며 같은 구간의 영상·점군·신호를 확인한다.
+재생본 생성과 실행은 [탐색 도구 안내](../exploration/README.md#실행)를 따른다.
+
+### 1.2 데이터 분류와 레코드 단위
+
+```mermaid
+flowchart TD
+    D["한 주행 장면"] --> S["① 차량 신호"]
+    D --> A["② 객체 메타데이터"]
+    D --> R["③ 원시 센서"]
+    S --> S1["한 채널의 한 관측 = 1건<br/>조향각·IMU·ego_pose<br/>1,307.7 레코드/s · 464 KiB/s"]
+    A --> A1["한 시점의 객체 박스 = 1건<br/>위치·크기·방향·분류<br/>94.3 객체/s · 39 KiB/s"]
+    R --> R1["사진 또는 점군 파일 = 1건<br/>카메라·LiDAR·레이더<br/>158.8 파일/s · 25.89 MiB/s"]
+```
+
+위 수치는 원천 발생량이다. 클라우드 전송량은 채널 선택·보고 간격·사건 구간에 따라 정한다.
+채널별 측정값은 §4, 전송 정책은 [SDD](sdd.md)를 따른다.
 
 ---
 
-## 2. nuScenes 구조 먼저 이해하기
+## 2. nuScenes 구조
 
-이 데이터셋의 용어를 모르면 아래 표들이 읽히지 않는다. 최소한만 정리한다.
+### 2.1 데이터베이스 스키마
 
-### 2.1 계층 구조 — scene / sample / sample_data
+nuScenes는 JSON 테이블의 `token`으로 행을 식별하고, `*_token`으로 다른 테이블을 참조한다.
+구조를 **주행·센서 데이터**와 **객체 주석**으로 나누어 표시했다.
+각 상자에는 조회에 필요한 주요 필드를 적었다.
 
+#### 주행 구간과 센서 파일
+
+```mermaid
+erDiagram
+    log ||--o{ scene : log_token
+    scene ||--|{ sample : scene_token
+    sample ||--|{ sample_data : sample_token
+    ego_pose ||--o{ sample_data : ego_pose_token
+    calibrated_sensor ||--o{ sample_data : calibrated_sensor_token
+    sensor ||--o{ calibrated_sensor : sensor_token
+
+    log {
+        string token PK
+        string vehicle
+        string date_captured
+        string location
+    }
+    scene {
+        string token PK
+        string log_token FK
+        string name
+        int nbr_samples
+        string first_sample_token FK
+        string last_sample_token FK
+    }
+    sample {
+        string token PK
+        string scene_token FK
+        int64 timestamp
+        string prev FK
+        string next FK
+    }
+    sample_data {
+        string token PK
+        string sample_token FK
+        string ego_pose_token FK
+        string calibrated_sensor_token FK
+        string filename
+        int64 timestamp
+        boolean is_key_frame
+        string prev FK
+        string next FK
+    }
+    ego_pose {
+        string token PK
+        int64 timestamp
+        float_array translation
+        float_array rotation
+    }
+    calibrated_sensor {
+        string token PK
+        string sensor_token FK
+        float_array translation
+        float_array rotation
+        matrix camera_intrinsic
+    }
+    sensor {
+        string token PK
+        string channel
+        string modality
+    }
 ```
-scene   (장면)         약 20초짜리 주행 한 토막. mini에 10개
-  └ sample (샘플)      = 키프레임. 초당 2회. 3D 라벨이 붙는 유일한 시점
-      └ sample_data    센서 파일 한 개(사진 1장, 점군 1개). 키프레임 것 + 그 사이 것
-          └ annotation 그 키프레임에 보이는 객체 하나의 3D 박스
+
+`scene`은 약 20초 주행 구간, `sample`은 약 0.5초 간격의 키프레임이다.
+각 `sample_data`에는 센서 파일 경로와 관측 시각, 해당 시점의 차량 자세·캘리브레이션 참조가 들어 있다.
+
+#### 키프레임의 객체 주석
+
+```mermaid
+erDiagram
+    sample ||--o{ sample_annotation : sample_token
+    instance ||--|{ sample_annotation : instance_token
+    category ||--o{ instance : category_token
+    visibility ||--o{ sample_annotation : visibility_token
+    sample_annotation }o--o{ attribute : attribute_tokens
+
+    sample {
+        string token PK
+        int64 timestamp
+    }
+    sample_annotation {
+        string token PK
+        string sample_token FK
+        string instance_token FK
+        string visibility_token FK
+        string_array attribute_tokens FK
+        float_array translation
+        float_array size
+        float_array rotation
+        int num_lidar_pts
+        int num_radar_pts
+    }
+    instance {
+        string token PK
+        string category_token FK
+        string first_annotation_token FK
+        string last_annotation_token FK
+    }
+    category {
+        string token PK
+        string name
+    }
+    visibility {
+        string token PK
+        string level
+    }
+    attribute {
+        string token PK
+        string name
+    }
 ```
 
-| 용어 | 뜻 | mini 실측 |
-|---|---|---|
-| **scene** | 주행 한 토막. 연속 녹화의 일부를 잘라낸 것 | 10개, 각 19.1~20.0초 |
-| **sample** = **키프레임** | 센서 12개가 동시에 정렬되는 시점. **3D 라벨은 여기에만** | 404개, 2.06 Hz |
-| **sample_data** | 센서 파일 1개. 키프레임 것과 **그 사이 것(스윕)** 을 모두 포함 | 31,206개 |
-| **sweep**(스윕) | 키프레임이 아닌 sample_data. 라벨이 없다 | 26,358개 = **84.5%** |
-| **annotation** | 객체 하나의 3D 박스 + 클래스 + 관측 정보 | 18,538개 |
-| **ego** | 데이터를 수집한 **자기 차량**. 주변 객체와 구분하는 말 | — |
+객체 주석은 `sample`에 연결된다. 같은 키프레임의 센서 파일과 객체 박스를 함께 조회할 수 있다.
+`instance`는 한 장면 안에서 같은 객체의 주석을 연결하고, `category`는 차량·보행자 등의 분류를 나타낸다.
+위의 FK 표시는 JSON 테이블 간 참조 관계다.
 
-> **왜 키프레임과 스윕이 나뉘는가** — 센서마다 주기가 다르다(LiDAR 20Hz, 카메라 12Hz).
-> 12개가 "거의 같은 순간"에 찍힌 시점만 골라 키프레임으로 삼고, 사람이 3D 박스를 그리는
-> 비용이 커서 **라벨은 그 시점에만** 붙인다. 나머지 84.5%는 센서 원본만 있다.
->
-> **그래서 무손실 보존에는 스윕이 반드시 포함돼야 한다.** 라벨이 없다고 버리면 원시
-> 데이터의 대부분을 잃는다. 실제로 초기 구현이 키프레임만 담아 86%를 누락한 이력이 있다(§10.2).
+<details>
+<summary>nuScenes 공식 전체 스키마</summary>
 
-### 2.2 세 계층이 원천의 어디서 오는가
+![nuScenes 공식 데이터베이스 전체 스키마](https://www.nuscenes.org/public/images/nuscenes-schema.svg)
 
-| 이 문서의 계층 | nuScenes 원천 | 성격 |
-|---|---|---|
-| ① 신호 | **CAN bus 확장**(별도 다운로드) + `ego_pose` 테이블 | 차량이 스스로 아는 것 |
-| ② 객체 메타데이터 | `sample_annotation` 테이블 | **사람이 붙인 3D 주석** |
-| ③ 원시 센서 | `samples/` · `sweeps/` 디렉터리의 파일 | 센서가 찍은 것 |
+출처: [nuScenes 공식 스키마 정의](https://github.com/nutonomy/nuscenes-devkit/blob/master/docs/schema_nuscenes.md).
 
-②는 차량에서 실시간으로 계산한 결과가 아니라 nuScenes에 포함된 주석이다. 관제 화면에서
-주변 객체의 위치를 재생하는 데만 쓰며, 품질 판정 입력으로 사용하지 않는다.
+</details>
 
-### 2.3 알아둘 물리량 두 가지
+#### 키프레임과 스윕
 
-**쿼터니언(quaternion)** — 3차원 회전을 숫자 4개 `(w, x, y, z)`로 나타내는 방법이다.
-오일러각(roll/pitch/yaw)과 달리 짐벌락이 없고 보간이 안정적이라 로보틱스 표준이다.
-**항상 `|q| = √(w²+x²+y²+z²) ≈ 1`** 이어야 하고, 이 성질이 검증 규칙이 된다(§8.3).
+센서는 키프레임 사이에도 관측을 계속한다. 이 중간 관측을 **스윕(sweep)**이라고 부른다.
+아래 그림은 관측 순서를 단순화한 것이다.
 
-**ENU 좌표** — East-North-Up. 지도의 특정 지점을 원점(0,0)으로 잡고 **동쪽 몇 m, 북쪽 몇 m**
-로 위치를 적는 방식이다. `ego_pose.translation`이 이 형식이며 **위경도가 아니다.**
-자세한 것은 §7.
+```mermaid
+flowchart LR
+    K0["키프레임 센서 데이터<br/>is_key_frame = true"] --> W1["sweep"]
+    W1 --> W2["sweep"]
+    W2 --> K1["다음 키프레임 센서 데이터<br/>is_key_frame = true"]
+    S0["sample A + 객체 주석"] -.-> K0
+    S1["sample B + 객체 주석"] -.-> K1
+```
+
+센서별 `sample_data.prev/next` 체인을 순회하면 키프레임과 스윕을 모두 읽을 수 있다.
+비키프레임의 `sample_token`은 시간상 가장 가까운 **다음 sample**을 참조한다.
+[공식 sample_data 규칙](https://github.com/nutonomy/nuscenes-devkit/blob/master/docs/schema_nuscenes.md#sample_data)
+
+mini 센서 파일의 **84.5%가 스윕**이다. 원본 보존 시 전체 체인을 순회하고 파일 수를 대조한다(§10.2).
+
+### 2.2 원천과 프로젝트 레코드의 대응
+
+```mermaid
+flowchart LR
+    CAN["CAN bus 확장 + ego_pose"] --> S["① 신호<br/>차량 상태·운동"]
+    ANN["sample_annotation"] --> A["② 객체 메타데이터<br/>주변 객체 재생"]
+    FILE["samples/ + sweeps/"] --> R["③ 원시 센서<br/>사진·점군 원본"]
+```
+
+CAN bus 확장은 별도로 내려받는다. 객체 메타데이터에는 사람이 작성한 3D 주석을 사용한다.
+
+### 2.3 회전과 위치 표현
+
+**쿼터니언(quaternion)**은 물체의 방향과 회전을 표현하는 데 사용한다.
+3차원 회전은 **어떤 축을 중심으로 얼마나 돌리는가**로 설명할 수 있다.
+단위 쿼터니언은 이 회전축과 회전각을 네 값 `(w, x, y, z)`에 담는다.
+회전각이 θ일 때 `w = cos(θ/2)`, `(x, y, z) = 단위 회전축 × sin(θ/2)`로 표현한다.
+예를 들어 z축을 중심으로 90° 회전하면 약 `(0.7071, 0, 0, 0.7071)`이다.
+[회전축·각도와 쿼터니언의 관계 — SciPy 공식 문서](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.transform.Rotation.from_quat.html)
+
+이 프로젝트에서는 다음 세 곳에 사용한다.
+
+- **차량 자세:** `ego_pose.rotation`으로 지도 좌표계에서 차량이 향하는 방향과 기울기를 나타낸다.
+- **센서 장착 방향:** `calibrated_sensor.rotation`으로 센서 좌표를 차량 좌표로 회전시킨다. 장착 위치의 평행이동을 함께 적용해 점군을 정렬한다(§7.2).
+- **객체 박스 방향:** `sample_annotation.rotation`으로 주변 차량·보행자의 3D 박스를 해당 방향으로 배치한다.
+
+회전을 나타내는 단위 쿼터니언은 크기가 1이므로 `√(w²+x²+y²+z²) ≈ 1`을 검증한다(§8.3).
+nuScenes의 성분 순서는 `(w, x, y, z)`이며, 재생기는 Rerun에 전달할 때 `(x, y, z, w)`로 순서를 바꾼다.
+회전의 합성·역변환과 정규화 예시는 [ROS 2의 쿼터니언 기초 설명](https://github.com/ros2/ros2_documentation/blob/rolling/source/ROS-Framework/interfaces/Working-with-interfaces/Quaternion-Fundamentals.rst)에서 확인할 수 있다.
+
+**ENU(East-North-Up)**는 지도 원점을 기준으로 동쪽·북쪽·위쪽 거리를 미터로 표현하는 좌표계다.
+`ego_pose.translation`에 이 좌표를 사용하며, 지도 표시용 위경도 변환은 §7에서 설명한다.
 
 ---
 
 ## 3. 원천 데이터
 
-### 3.1 nuScenes
+### 3.1 데이터셋 규모와 센서 구성
 
-[nuScenes](https://www.nuscenes.org/)는 자율주행 전체 센서 스위트를 갖춘 공개 데이터셋이다.
-합성이 아니라 **보스턴·싱가포르 실도로에서 수집된 실측 데이터**이며, 원래 타임스탬프대로
-재생해 실시간 스트림으로 쓴다.
+[nuScenes](https://www.nuscenes.org/)는 보스턴·싱가포르의 실도로에서 수집한 자율주행 데이터셋이다.
+전체 공개본은 약 20초 길이의 1,000장면으로 구성된다. 이 프로젝트는 **v1.0-mini 10장면**을 사용한다.
 
-| 항목 | 전체(v1.0-trainval) | **mini 실측** |
-|---|---|---|
-| 장면 | 1,000개 × 각 약 20초 | **10개** · 19.1~20.0초(평균 19.7) |
-| 총 주행시간 | 약 5.4시간 | **196.5초** |
-| 수집 차량 | **2대** (`n008`, `n015`) | 동일 2대 |
-| 수집 기간 | 2018-07-24 ~ 2018-11-21 | **8일** |
-| 수집 지역 | 4곳 | 동일 4곳 |
-| 키프레임 | 40k | **404개** |
-| 3D 라벨 | 1.4M 박스 | **18,538개** |
-| 클래스 | 분류체계 **23종** | 실제 등장 **18종** |
-| 센서 파일 크기 | 약 535 GB | **4.97 GiB** (31,206개) |
-| 배포 아카이브 | — | `v1.0-mini.tgz` **3.9 GiB** |
-
-센서 구성: 카메라 6대(FRONT / FRONT_LEFT / FRONT_RIGHT / BACK / BACK_LEFT / BACK_RIGHT),
-LiDAR 1대(Velodyne HDL32E, 32빔), 레이더 5대(FRONT / FRONT_LEFT / FRONT_RIGHT / BACK_LEFT /
-BACK_RIGHT).
-
-수집 지역 4곳: `boston-seaport`, `singapore-onenorth`, `singapore-queenstown`,
-`singapore-hollandvillage`.
-
-> **CAN bus 확장은 별도 다운로드다**(약 745 MB, 인증 불필요). 1,000장면 **전체**의 CAN을
-> 담고 있어 mini만 쓰더라도 전체를 받는다. 이게 없으면 신호 계층이 `ego_pose` 한 채널
-> (19.7 Hz)로 쪼그라든다 — 즉 **신호의 98.5%가 CAN에서 온다.**
-
-**라이선스**: 비상업 연구용(Motional 약관). **재배포 금지** — 데이터 파일을 저장소에
-커밋하지 않는다.
-
-### 3.2 두 가지 규모 제약 — 총량과 연속성
-
-**둘은 다른 문제다.**
-
-| | 값 | 조절 가능한가 |
-|---|---|---|
-| **총량** | 5.4시간 | ✅ 동시 스트림 수로 나뉜다 |
-| **연속 구간** | **약 20초** | ❌ **늘릴 방법이 없다** |
-
-연속 구간이 20초인 이유는 nuScenes 공개본이 연속 주행 로그가 아니라 **긴 주행에서 선택한
-20초 장면의 집합**이기 때문이다. 같은 `log`(같은 차량·같은 날)의
-장면들조차 이어지지 않는다 — mini 실측:
-
-```
-log n015-2018-11-21-19-38-26   차량 n015   장면 3개
-  scene-1077   20.0초
-  scene-1094   19.5초  ← 앞 장면과 간격 460.1초 (7분 40초)
-  scene-1100   19.5초  ← 앞 장면과 간격 120.5초 (2분)
+```mermaid
+flowchart TD
+    MINI["v1.0-mini<br/>10장면 · 총 196.5초"]
+    MINI --> FRAME["키프레임<br/>404개"]
+    MINI --> FILE["센서 파일<br/>31,206개 · 4.97 GiB"]
+    MINI --> OBJ["객체 주석<br/>18,538개 · 18종"]
+    FRAME --> TIME["장면당 19.1~20.0초<br/>평균 19.7초"]
+    FILE --> CAM["카메라 6대<br/>전방·후방·좌우"]
+    FILE --> LIDAR["LiDAR 1대<br/>HDL32E · 32빔"]
+    FILE --> RADAR["레이더 5대<br/>전방·좌우 전후방"]
 ```
 
-mini 10장면 중 8개는 log에 장면이 1개뿐이라 인접 쌍 자체가 없고, 위 log만 3개를 갖는다.
-**인접 장면 간격 최소 120.5초 · 20초 이내로 붙은 쌍 0건.**
+원천 수집 차량은 두 대이며, 수집 지역은 보스턴과 싱가포르다.
+**CAN bus 확장은 별도로 내려받아야 한다.** 데이터는 [nuScenes 이용 약관](https://www.nuscenes.org/terms-of-use)에 따라 로컬에서 관리한다.
 
-> 정확한 정신 모델: **5.4시간짜리 주행이 아니라, 20초짜리 주행 1,000개다.**
-> 한 대로 몰아 재생해도 차량이 20초마다 다른 장소로 순간이동한다.
+### 3.2 장면 길이와 시간 간격
 
-**용도별 영향**
+각 장면은 긴 주행에서 선택한 약 20초 구간이다. 장면 전환 시 위치와 시각이 바뀌므로,
+지오펜스 체류 시간 같은 연속 분석은 장면별로 나누어 처리한다.
+장시간 운행 분석에는 연속 로그나 별도 시뮬레이션이 필요하다.
 
-| 용도 | 20초 제약 |
-|---|---|
-| 처리량·유실·중복 검증 | ✅ 무해 — 건수와 동시성의 문제이고 연속성과 무관 |
-| 장시간 안정성(메모리 누수, 상태 누적) | ✅ 무해 — 반복이라도 시간만 길면 된다 |
-| 관제 화면 | ⚠️ **20초마다 차량이 점프하는 것이 보인다** |
-| 지오펜스 체류 등 시간 누적 분석 | ❌ 연속 필요 |
+### 3.3 동시 재생 스트림
 
-또한 **트리거 클립이 실제 fleet의 동작 방식**이다 — 차량 1대의 25.89 MiB/s는 LTE 실효
-대역폭(약 12.5 MB/s)을 넘어 연속 업로드가 물리적으로 불가능하므로, 실제 차량은 온보드
-링버퍼에 기록하고 이벤트 전후 20~30초만 올린다. 공개 데이터셋이 대부분 클립 구조인
-이유다(nuScenes 20초, Waymo Open Motion 20초, Argoverse 2 15초).
+재생기는 장면마다 가상 `vehicle_id`를 부여해 N개 스트림을 동시에 생성한다.
+N은 **동시 재생 스트림 수**이며, 두 원천 차량의 데이터를 재사용한다.
 
-연속 데이터가 필요해지면 상위 원천은 **nuPlan**이다 — 같은 팀(Motional),
-1,200~1,500시간, 약 15,000개의 **수 분 단위 연속 로그**. 단 원시 센서가 있는 것은
-120시간(전체의 10%, 약 16TB)뿐이다.
+---
 
-### 3.3 "N대"는 동시 스트림 N개다
+## 4. 채널별 발생량
 
-원천 차량이 2대이므로 **서로 다른 실차량 N대의 데이터는 존재하지 않는다.** 재생기가
-장면에 가상 차량 id를 붙여 N개 스트림을 동시에 흘리는 것이다.
+`measure_dataset.py`의 기존 mini 10장면 측정값이다. 원시 센서·객체는 스팬 합 **196.5초**,
+신호는 **199.5초**를 기준으로 계산했다. KiB = 1,024 B, MiB = 1,024 KiB다.
 
-**실제 N대와 구별되지 않는 것** — 서로 다른 키 N개로 파티셔닝, 시간축 뒤섞임, 총 처리량
-N배, 동시성·백프레셔·순서·중복제거가 동일하게 걸린다. 파이프라인은 스트림이 실차량에서
-왔는지 재생기에서 왔는지 알 수 없다.
+### 4.1 원시 센서: 12채널, 25.89 MiB/s
 
-**구별되는 것** — 지리 분포(모든 차량이 같은 4개 지역), 내용 독립성(서로 다른 차량이 같은
-물리 차량의 주행을 재생), 차량 간 상관(실제 fleet은 서로를 보고 도로를 공유하나 여기선 독립).
-
-앞의 셋은 처리량·유실·중복 검증에 무해하고 관제 화면에는 유해하다.
-
-## 4. 채널별 실측 — 몇 Hz로, 어떤 크기로, 어떤 형식으로
-
-모든 수치는 `measure_dataset.py`가 mini 10장면 전수에서 산출한다.
-
-### 4.1 ③ 원시 센서 (12채널)
-
-기준: 키프레임 스팬 합 **196.5초**, 파일 31,206개, 총 **4.97 GiB**.
-
-| 채널 | 형식 | Hz | 평균 크기 | 대역폭 |
-|---|---|---|---|---|
-| `LIDAR_TOP` | `.pcd.bin` — float32 ×5 (x, y, z, intensity, ring) | 20.0 | **678.1 KiB** | **13.26 MiB/s** |
-| `CAM_FRONT_RIGHT` | JPEG 1600×900 | 11.9 | 183.2 KiB | 2.13 MiB/s |
-| `CAM_BACK_RIGHT` | JPEG 1600×900 | 11.9 | 180.0 KiB | 2.09 MiB/s |
-| `CAM_FRONT_LEFT` | JPEG 1600×900 | 11.9 | 177.7 KiB | 2.07 MiB/s |
-| `CAM_FRONT` | JPEG 1600×900 | 11.9 | 176.5 KiB | 2.05 MiB/s |
-| `CAM_BACK_LEFT` | JPEG 1600×900 | 11.8 | 170.8 KiB | 1.98 MiB/s |
-| `CAM_BACK` | JPEG 1600×900 | 11.8 | 157.8 KiB | 1.82 MiB/s |
-| `RADAR_FRONT` | `.pcd` (텍스트 헤더 + 바이너리) | 13.4 | 9.1 KiB | 0.12 MiB/s |
-| `RADAR_BACK_RIGHT` | `.pcd` | 13.4 | 8.6 KiB | 0.11 MiB/s |
-| `RADAR_BACK_LEFT` | `.pcd` | 13.4 | 8.4 KiB | 0.11 MiB/s |
-| `RADAR_FRONT_RIGHT` | `.pcd` | 13.6 | 6.3 KiB | 0.08 MiB/s |
-| `RADAR_FRONT_LEFT` | `.pcd` | 13.7 | 5.4 KiB | 0.07 MiB/s |
-| **합계** | | **158.8** | | **25.89 MiB/s** |
-
-> **10진으로 적으면 27.15 MB/s다.** 같은 값이고 단위만 다르다
-> (25.89 × 1,048,576 ÷ 10⁶). LTE 실효 대역폭과 비교할 때는 보통 10진을 쓴다.
-
-**LiDAR 한 채널이 카메라 6대 합(12.14 MiB/s)보다 크다.** 압축 없는 점군이기 때문이다.
-LiDAR는 프레임마다 약 3.5만 포인트 × (x, y, z, intensity, ring) × float32 = 678 KiB를
-그대로 쓴다. 카메라는 JPEG 압축이 들어간다.
-
-**키프레임과 스윕의 구성** — 31,206건 중 키프레임은 4,848건(**15.5%**), 바이트로는
-**13.6%** 다. 즉 **원시 데이터의 84.5%가 스윕**이므로 무손실 보존에는 스윕이 반드시
-포함돼야 한다(§2.1).
-
-### 4.2 ① 신호 (CAN + ego_pose)
-
-**레코드 하나 = 한 채널의 한 샘플**이다. 기준: mini 10장면, 신호 스팬 **199.5초**,
-총 **260,890건**.
-
-| 채널 | Hz | 건수 | 필드 수 | 주요 필드 |
-|---|---|---|---|---|
-| **`zoesensors`** | **943.8** | 188,287 (72.2%) | 3 | `brake_sensor`, `steering_sensor`, `throttle_sensor` |
-| `ms_imu` | 98.3 | 19,608 | 3 | `linear_accel[3]`, `q[4]`, `rotation_rate[3]` |
-| `zoe_veh_info` | 98.2 | 19,583 | **17** | 바퀴별 속도 4종, `odom`, `steer_raw`, `meanEffTorque`, `regen` 등 |
-| `steeranglefeedback` | 96.7 | 19,298 | 1 | `value` (rad) |
-| `pose` | 49.0 | 9,780 | 5 | `pos`, `vel`, `accel`, `orientation`, `rotation_rate` |
-| `ego_pose` | 19.7 | 3,935 | 5 | `translation[3]`, `rotation[4]`, 파생 `lat`/`lon`, `location` |
-| `vehicle_monitor` | 2.0 | 399 | **14** | `vehicle_speed`, `yaw_rate`, `steering`, `brake`, `throttle`, `gear_position`, 바퀴 rpm 2종, `battery_level`, 방향지시등 등 |
-| **합계** | **1,307.7** | **260,890** | | |
-
-레코드 크기(JSON 기준): `values`만 평균 **148 B**, 전송 헤더·`scene_id`·`channel`·시각
-2종을 포함한 **온전한 레코드 평균 363 B**. 채널별로는 `steeranglefeedback` 252 B부터
-`zoe_veh_info` 641 B까지 퍼져 있다.
-
-> **측정 기준이 바뀌었다.** 이전 판은 **3장면 60초**에서 1,295.2 rec/s · `zoesensors`
-> 937.4 Hz · 레코드 342 B를 얻었다. 이 판은 **mini 10장면 전수**로 다시 재서 1,307.7 rec/s ·
-> 943.8 Hz · 363 B다. 오류 정정이 아니라 **표본이 3장면에서 10장면으로 늘어난 것**이고,
-> 레코드 크기는 §5.0 전송 헤더 확정이 반영된 값이다. 형제 문서에 남아 있는 1,295는 옛
-> 표본 기준이며 파생 계산(WAL 처리량 여유, ack 주기 등)의 결론을 바꾸지 않는다.
-
-> ⚠️ **`zoesensors`가 943.8 Hz다.** 샘플 간격이 **평균 1.06 ms**다 — 페달·조향
-> 원시 센서를 밀리초 단위로 뽑는다. 이 한 채널이 신호 레코드의 **72.2%** 를 차지한다.
-> 설계 초안은 `ms_imu` 100Hz가 최고인 줄 알았으나 실제로는 9배 높은 채널이 있었다.
-
-**`ego_pose` 채널 선택** — `ego_pose`는 `sample_data`마다 존재하므로 전 채널을 세면
-158.8 Hz까지 올릴 수 있다. 다만 같은 순간의 자세를 센서 수만큼 중복 기록하는 셈이라
-**LIDAR_TOP 체인 한 줄(19.7 Hz)** 만 쓴다.
-
-> **⚠️ 결합형(`SignalRecord`)을 원천 규모로 착각하면 안 된다.**
->
-> `exploration`에는 ego_pose 시각에 CAN을 최근접 결합한 **파생형**이 따로 있다. 조회
-> 편의용이며 **ego_pose 주기(19.7 Hz)로 다운샘플된다** — mini에서 3,935건으로,
-> 채널 네이티브 260,890건의 **1.5%** 다. `zoesensors` 188,287건이 통째로 사라진다.
->
-> **정본은 채널 네이티브다.** 무손실 원칙은 신호 계층에도 적용된다.
-
-### 4.3 ② 객체 메타데이터
-
-| 항목 | 실측 |
-|---|---|
-| 키프레임 주기 | **2.06 Hz** (평균 간격 0.499초) |
-| 키프레임 수 | 404개 |
-| 키프레임당 객체 | 평균 **45.9개** · 최소 8 · 최대 **156개** |
-| 객체 발생률 | **94.3 객체/초** (총 18,538건) |
-| 클래스 | 분류체계 23종 중 mini에 **18종** 등장 |
-| 대역폭 | 약 **39 KiB/s** (객체 레코드 약 420 B) |
-
-**메시지 단위 결정** — 키프레임 하나에 객체가 최대 156개 붙는다. 이를 한 메시지에 배열로
-담으면 메시지가 64 KiB를 넘나들고, 객체 단위로 쪼개면 초당 94건이 된다. 이 문서는 **필드
-계약만 정하고**(§5.2) 메시지 경계는 전송 설계에 맡긴다(§11).
-
-### 4.4 규모 환산
-
-N = 동시 스트림 수(§3.3).
-
+```mermaid
+pie showData
+    title 원시 센서의 초당 데이터 크기 (MiB/s)
+    "LiDAR 1채널" : 13.26
+    "카메라 6채널" : 12.14
+    "레이더 5채널" : 0.49
 ```
+
+LiDAR 한 채널이 원시 데이터 크기의 약 절반을 차지한다.
+프레임당 약 3.5만 포인트를 float32 5개(x, y, z, intensity, ring)로 저장한다.
+카메라는 1600×900 JPEG, 레이더는 텍스트 헤더와 바이너리를 갖는 PCD 형식이다.
+전체 발생량을 10진 단위로 환산하면 **27.15 MB/s**다.
+
+<details>
+<summary>센서 종류별 형식·주기·파일 크기</summary>
+
+- **LiDAR 1채널:** 20.0 Hz, 평균 678.1 KiB/파일. `LIDAR_TOP`.
+- **카메라 6채널:** 11.8~11.9 Hz, 평균 157.8~183.2 KiB/파일. 전방·후방과 각각의 좌우 채널.
+- **레이더 5채널:** 13.4~13.7 Hz, 평균 5.4~9.1 KiB/파일. 전방·좌우 전후방 채널.
+
+전체 발생량은 **158.8 파일/s**다. 상세 채널별 수치는 [측정 스크립트](../exploration/scripts/measure_dataset.py)로 확인한다.
+
+</details>
+
+### 4.2 차량 신호: 7채널, 1,307.7 레코드/s
+
+레코드 하나는 한 채널의 한 샘플이다. mini 전체 신호는 **260,890건**이다.
+
+```mermaid
+pie showData
+    title 차량 신호 260,890건의 채널 분포
+    "zoesensors" : 188287
+    "ms_imu" : 19608
+    "zoe_veh_info" : 19583
+    "steeranglefeedback" : 19298
+    "pose" : 9780
+    "ego_pose" : 3935
+    "vehicle_monitor" : 399
+```
+
+페달·조향 센서인 `zoesensors`가 **943.8 Hz**로 신호 건수의 **72.2%**를 차지한다.
+`ego_pose`는 `LIDAR_TOP` 체인에서 읽어 19.7 Hz로 구성한다.
+
+<details>
+<summary>채널별 주기와 주요 필드</summary>
+
+- **`zoesensors` — 943.8 Hz, 188,287건:** `brake_sensor`, `steering_sensor`, `throttle_sensor`.
+- **`ms_imu` — 98.3 Hz, 19,608건:** `linear_accel[3]`, `q[4]`, `rotation_rate[3]`.
+- **`zoe_veh_info` — 98.2 Hz, 19,583건:** 바퀴별 속도 4종, `odom`, `steer_raw`, `meanEffTorque`, `regen` 등 17필드.
+- **`steeranglefeedback` — 96.7 Hz, 19,298건:** 조향 휠 회전각 `value`(rad).
+- **`pose` — 49.0 Hz, 9,780건:** `pos`, `vel`, `accel`, `orientation`, `rotation_rate`.
+- **`ego_pose` — 19.7 Hz, 3,935건:** `translation[3]`, `rotation[4]`, 파생 `lat`/`lon`, `location`.
+- **`vehicle_monitor` — 2.0 Hz, 399건:** `vehicle_speed`, `yaw_rate`, `steering`, `brake`, `throttle`, `gear_position`, 바퀴 rpm 2종, `battery_level`, 방향지시등 등 14필드.
+
+전송 헤더·장면·채널·시각을 포함한 JSON 레코드의 평균 크기는 **363 B**다.
+
+</details>
+
+재생용 `SignalRecord`는 ego_pose 시각에 CAN 값을 최근접 결합해 만든다.
+결과는 **19.7 Hz, 3,935건**이며, 각 채널의 원천 샘플은 채널별 레코드로 관리한다.
+클라우드로 보낼 레코드는 수집 정책에 따라 선택하고 영속 outbox에 기록한다.
+
+### 4.3 객체 메타데이터: 18,538개 박스
+
+키프레임은 약 **2 Hz**, 프레임당 객체는 평균 **45.9개**, 최대 **156개**다.
+객체 레코드는 평균 약 **420 B**, 전체는 약 **39 KiB/s**다.
+키프레임 하나의 객체를 배열로 전송할 때는 최대 배치 크기를 확인해야 한다.
+
+### 4.4 동시 스트림 수에 따른 발생량
+
+원천 전량을 재생할 때의 예상 발생량은 동시 스트림 수 N에 비례한다.
+
+```text
 신호 레코드/초 = 1,307.7 × N
-신호 대역폭    = 464 KiB/s × N      (레코드 평균 363 B)
-원시 대역폭    = 25.89 MiB/s × N
+신호 데이터/초 = 464 KiB × N       (JSON 레코드 평균 363 B)
+원시 데이터/초 = 25.89 MiB × N
 ```
 
-| N | 신호 rec/s | 신호 대역폭 | 원시 대역폭 | 원시 하루 축적 |
-|---|---|---|---|---|
-| 1 | 1,308 | 464 KiB/s | 25.9 MiB/s | **2.1 TiB** |
-| 10 | 13,077 | 4.5 MiB/s | 259 MiB/s | 21.3 TiB |
-| 100 | 130,774 | 45.3 MiB/s | 2,589 MiB/s | 213 TiB |
-
-> ⚠️ 위 표는 **곱셈**이다. 부하 시험 결과가 아니다.
-
-**목표 N은 이 문서에서 정하지 않는다.** 원천이 차량 2대이므로 어떤 N도 데이터에서
-도출되지 않는다.
+실제 클라우드 전송량은 보고 간격·선택 채널·집중 관찰 비율·이력 요청량으로 산정한다.
+동시 접속 목표와 전송 정책은 [SDD](sdd.md)에 정리했다.
 
 ---
 
 ## 5. 필드 계약
 
-계층별로 필드·타입·제약을 고정한다.
+세 레코드는 **무엇을 관측했는지**를 나타내고, 전송 헤더는 **어떤 차량이 어떤 전송 항목으로 보냈는지**를 나타낸다.
 
-### 5.0 전송 헤더 — 모든 레코드 공통
+```mermaid
+flowchart TD
+    H["전송 식별자<br/>vehicle_id · boot_id · seq"] --> S["SIGNAL<br/>channel + sensor_time + 값 맵"]
+    H --> O["PERCEPTION<br/>sample_id + track_id + 3D 박스"]
+    H --> R["SEGMENT_REF<br/>segment_id + blob_uri + 구간"]
+    R -. "파일 참조" .-> M["MCAP 원본 파일<br/>사진·점군·캘리브레이션"]
+```
 
-스트림에 올라가는 모든 레코드가 공유하는 셋이다. **이 3튜플이 자연 키이자 dedup 키다.**
+`track_id`는 주변 객체, `segment_id`는 원본 파일, `vehicle/boot/seq`는 전달 레코드의 식별자다.
+아래 표에 각 레코드의 필드명·타입·제약 조건을 정리했다.
 
-| 필드 | 타입 | 제약 | 설명 |
-|---|---|---|---|
-| `vehicle_id` | string | NOT NULL, 파티션 키 | 가상 차량 id(§3.3) |
-| `boot_id` | string(UUID) | NOT NULL, **스트림 헤더에 1회** | 온보드 로그의 생애 식별자. 로그가 사라지면 바뀐다 |
-| `seq` | long | NOT NULL, 차량별 단조 증가 | 온보드 로그가 append 시점에 발급 |
+### 5.0 전송 식별자와 Kafka 헤더
 
-`seq`는 **유일성뿐 아니라 연속성**을 준다. 결번이 곧 유실이므로 유실을 탐지할 수 있고,
-"어디까지 봤는가"를 정수로 들 수 있어 dedup 상태가 데이터 양이 아니라 차량 수에
-비례한다. 설계·실측은 [ack·dedup 설계](ack-dedup-design.md).
+Kafka 파티션 키는 `vehicle_id`, 저장 레코드 식별 키는 **`(vehicle_id, boot_id, seq)`**다.
+다음 값은 Avro 본문과 분리해 Kafka 헤더에 저장하며, 수치는 UTF-8 문자열로 전달한다.
 
-> **`event_id`(ULID)를 제거했다.** dedup 키·멱등 upsert 키·추적 id 세 용도가 모두
-> `(vehicle_id, boot_id, seq)`로 대체된다. 3튜플은 **정렬 가능**해서 오히려 낫고,
-> 레코드당 약 22 B가 줄고, 초당 수십만 회의 ULID 생성이 없어진다. 근거는
-> [ack·dedup 설계](ack-dedup-design.md) §3.8.
+| 헤더 | 의미 |
+|---|---|
+| `vehicle_id` | 인증된 차량 식별자 |
+| `boot_id` | gRPC WAL의 생애 ID. MQTT에서는 차량·원천 boot·stream으로 생성한 UUIDv5 |
+| `seq` | 영속 수용한 레코드의 순번. MQTT는 stream별 발급 |
+| `kind` | SIGNAL / PERCEPTION / SEGMENT_REF |
+| `source_boot_id` | MQTT outbox의 원래 생애 ID |
+| `stream_id` | MQTT 전달 목적: `status` / `event` / `history` |
+| `report_interval_ms` | MQTT 보고 간격. 최신성·미수신 판단에 사용 |
 
-`boot_id`가 레코드가 아니라 스트림 헤더에 실리는 이유 — 한 스트림 안에서는 불변이다.
-저장 계층에서는 열로 펼쳐 3튜플을 완성한다.
-
-`vehicle_id`는 **게이트웨이가 클라이언트 인증서에서 취한다** — 페이로드에 두 벌을 두면
-하류가 어느 쪽을 믿느냐에 따라 구멍이 열린다([SDD](sdd.md) S-9).
+MQTT는 stream별 `boot_id`를 생성해 같은 `seq`의 충돌을 피한다. 재전송에도 같은 식별 키를 유지한다.
+인증·배치·ACK·중복 제거의 상세 계약은 [MQTT 수집 계약](mqtt-contract.md#2-저장ack중복-제거의-상세-계약)를 따른다.
 
 ### 5.1 신호 (`vehicle-signal`)
 
-레코드 하나가 **한 채널의 한 샘플**이다. 채널마다 필드가 다르므로 공통 헤더 + 채널별
-값 맵 구조를 쓴다.
+레코드 하나는 **한 채널의 한 샘플**이다. 값은 타입별 맵에 담는다.
+스키마: [vehicle-signal.avsc](../schemas/vehicle-signal.avsc).
+
+<details>
+<summary>신호 필드와 채널별 값 제약 펼치기</summary>
 
 | 필드 | 타입 | 제약 | 설명 |
 |---|---|---|---|
 | §5.0 전송 헤더 | — | PK = `(vehicle_id, boot_id, seq)` | |
 | `scene_id` | string | NOT NULL | 소속 장면 |
-| `channel` | string | NOT NULL | §4.2의 7개 중 하나 |
+| `channel` | string | NOT NULL | 신호 채널명. nuScenes 원천 채널은 §4.2 참조 |
 | `sensor_time` | timestamp-micros | NOT NULL | **센서 클럭.** 정본 시간축 |
 | `log_time` | timestamp-micros | NOT NULL | 온보드 기록 시각 |
-| `values_num` | map\<double\> | NOT NULL (빈 맵 허용) | 스칼라 값 **37종**. 정수 필드도 double로 넓힌다 — 전부 2^53 안이라 무손실 |
-| `values_vec` | map\<array\<double\>\> | NOT NULL | 벡터 값. 키 이름 **9종**(채널·키 쌍으로는 10). 길이 3(위치·가속도·각속도) 또는 4(쿼터니언) |
+| `values_num` | map\<double\> | NOT NULL (빈 맵 허용) | 속도·조향각 등 스칼라 값 |
+| `values_vec` | map\<array\<double\>\> | NOT NULL | 위치·가속도 등 3차원 벡터, 4성분 쿼터니언 |
 | `values_str` | map\<string\> | NOT NULL | 문자열 값. 현재 `location` 하나 |
 
-**왜 타입별로 맵을 셋 나누는가** — 값 타입이 double·array\<double\>·string 셋이라 맵 하나에
-담으려면 Avro union이 필요하고, 그러면 하류(Flink·ClickHouse)가 값마다 타입 분기를 해야 한다.
-셋으로 나누면 ClickHouse에서 `Map(String, Float64)` 등으로 그대로 떨어진다.
+타입별 맵은 Flink·ClickHouse에서 값마다 타입을 분기하는 처리를 줄인다.
 
-**null 표현은 키 부재다.** `lat`/`lon` 변환 실패 시 키를 넣지 않는다.
+null은 해당 키를 생략해 표현한다. `lat`/`lon` 변환 실패에도 같은 규칙을 적용한다.
 
 `ego_pose` 채널의 `values`:
 
 | 키 | 타입 | 제약 | 설명 |
 |---|---|---|---|
-| `translation` | array\<double\>[3] | z는 항상 0 | **ENU 로컬 미터** — 위경도 아님(§7) |
+| `translation` | array\<double\>[3] | z는 항상 0 | ENU 로컬 미터(§7) |
 | `rotation` | array\<double\>[4] | \|q\| ≈ 1 | 쿼터니언 (w, x, y, z) |
 | `lat` / `lon` | double | nullable | WGS84 파생(§7). 변환 실패 시 null |
 | `location` | string | NOT NULL | 4개 지역 중 하나 |
@@ -370,20 +426,25 @@ CAN 채널의 주요 값 제약:
 
 | 키 | 채널 | 제약 |
 |---|---|---|
-| `value` (조향각) | `steeranglefeedback` | mini 실측 **[-5.13, 5.48] rad**. ±π를 넘는다 — 바퀴 각도가 아니라 **조향 휠 회전각**이기 때문이다. 전체 데이터셋 범위는 미측정 |
+| `value` (조향각) | `steeranglefeedback` | 조향 휠 회전각. mini 범위 **[-5.13, 5.48] rad**. 전체 데이터셋 범위는 추가 측정 예정 |
 | `vehicle_speed` | `vehicle_monitor` | >= 0. mini 실측 [0, 53.8] |
 | `rotation_rate` | `ms_imu` | array[3], z가 yaw rate |
 
+</details>
+
 ### 5.2 객체 메타데이터 (`perception-object`)
 
-레코드 하나가 **3D 박스 하나**다.
+레코드 하나는 **3D 박스 하나**다. 스키마: [perception-object.avsc](../schemas/perception-object.avsc).
+
+<details>
+<summary>객체 메타데이터 필드 펼치기</summary>
 
 | 필드 | 타입 | 제약 | 설명 |
 |---|---|---|---|
 | §5.0 전송 헤더 | — | PK = `(vehicle_id, boot_id, seq)` | |
 | `scene_id` / `sample_id` | string | NOT NULL | 장면 / 키프레임 |
 | `sensor_time` | timestamp-micros | NOT NULL | 키프레임 시각 |
-| `track_id` | string | NOT NULL | **동일 객체의 시간축 연속 식별자** — 프레임을 넘어 같은 객체를 잇는다 |
+| `track_id` | string | NOT NULL | 같은 scene 안에서 프레임 간 객체를 연결하는 식별자 |
 | `category` | string | NOT NULL | `vehicle.car`, `human.pedestrian.adult` 등 (분류체계 23종) |
 | `attribute` | string | nullable | `vehicle.moving` / `vehicle.parked` / `pedestrian.standing` 등 |
 | `center_x/y/z` | double | NOT NULL | 박스 중심 (**글로벌 프레임**, m) |
@@ -393,95 +454,78 @@ CAN 채널의 주요 값 제약:
 | `num_lidar_pts` | int | >= 0 | 박스 안의 LiDAR 포인트 수. 0은 거리나 가림 때문에 정상적으로 발생할 수 있다(§8.1) |
 | `num_radar_pts` | int | >= 0 | 박스 내 레이더 포인트 수 |
 
+</details>
+
 ### 5.3 원시 로그 참조 (`segment-ref`)
 
-원시 센서는 25.89 MiB/s이므로 메시지에 실을 수 없다. 파일은 별도 보관하고 **참조와
-메타데이터만** 레코드로 만든다.
+원시 센서 파일은 오브젝트 스토리지에 저장하고, `segment-ref`로 위치와 시간 범위를 조회한다.
+3D 재생에 필요한 캘리브레이션도 함께 보관한다.
+스키마: [segment-ref.avsc](../schemas/segment-ref.avsc).
 
-> **용어 — 세그먼트와 참조는 다른 것이다.**
->
-> | 용어 | 실체 | 크기 | 사는 곳 |
-> |---|---|---|---|
-> | **세그먼트** | 로그 파일 자체. 한 차량의 한 시간구간 전체 센서 기록 | **298~341 MiB** (MCAP·zstd 실측 3장면) | 오브젝트 스토리지 |
-> | **`segment-ref`** | 그 파일을 **가리키는 참조 레코드** | < 2 KiB | 메시지 버스 · 질의 저장소 |
->
-> 이 스키마를 처음 `log-segment`라 불렀는데, 이름이 "이것이 세그먼트다"처럼 읽혀 파일과
-> 혼동됐다. **참조임을 이름에 박아** `segment-ref`로 고쳤다. Claim-Check 비유로는
-> 세그먼트가 창고에 맡긴 짐이고 `segment-ref`가 보관증이다.
+<details>
+<summary>원본 파일 참조 필드 펼치기</summary>
 
 | 필드 | 타입 | 제약 | 설명 |
 |---|---|---|---|
 | §5.0 전송 헤더 | — | PK = `(vehicle_id, boot_id, seq)` | |
-| `segment_id` | string(ULID) | UNIQUE | **파일의 정체**다. 전송 헤더가 레코드의 정체라면 이쪽은 blob의 정체이므로 둘 다 필요하다 |
-| `scene_id` | string | NOT NULL | |
+| `segment_id` | string(ULID) | UNIQUE | 원본 파일의 식별자 |
+| `scene_id` | string | nullable | 재생 장면 식별자 |
 | `blob_uri` | string | NOT NULL | 로그 파일 위치 |
 | `t_start` / `t_end` | timestamp-micros | NOT NULL | 세그먼트 시간 범위 |
 | `sensor_channels` | array\<string\> | NOT NULL | 포함 채널 목록 |
 | `size_bytes` | long | > 0 | |
 | `checksum` | string | NOT NULL | sha256 — 무결성 검증 |
-| `sample_count` | int | > 0 | |
-| **`calibration`** | map | NOT NULL | **채널별 센서 외부/내부 파라미터.** 없으면 로그만으로 3D 재구성이 불가능하다(§7.2) |
+| `sample_count` | int | > 0 | MCAP 메시지 수 |
+| `state` | enum | NOT NULL | `UPLOADED` / `DROPPED` |
+| `drop_reason` | string | nullable | 업로드 포기 사유 |
+| `calibration` | map\<string\> | NOT NULL | 3D 재구성에 사용하는 채널별 외부·내부 파라미터(§7.2) |
+
+</details>
 
 ### 5.4 실패 격리 (`dlq-envelope`)
 
-이미 확정돼 있다 — `schemas/dlq-envelope.avsc`. 필드: `original_payload`(원본 바이트
-무손실 보존), `error_class`(4분류 enum), `error_detail`, `source_subscription`,
-`pipeline_step`, `processing_time`, `attempt`.
-
-`error_class` 4분류: `PARSE_FAILURE` / `SCHEMA_VALIDATION_FAILURE` /
-`BUSINESS_RULE_FAILURE` / `SINK_WRITE_FAILURE`.
-
-### 5.5 스키마 정합 — 해소됨
-
-P2에서 작성한 `.avsc` 두 개가 이 계약과 어긋나 있었다. **2026-08-28에 재작성해 닫았다.**
-
-| | 어긋난 내용 | 결과 |
-|---|---|---|
-| 신호 레코드 단위 | 결합형(`pos_x`·`quat_*` 평탄화)이라 ego_pose 주기로 다운샘플 | **신호의 1.5%만 전송**되고 있었다 |
-| `event_id` | §5.0에서 제거했는데 스키마에 잔존 | 레코드당 약 22 B 낭비 |
-
-재작성 후 종단 재검증(2장면):
-
-| | 이전 | 이후 |
-|---|---|---|
-| 전송 신호 | 771건 (ego_pose만) | **51,025건 (7채널 전부)** |
-| Kafka 적재 | 771 | **51,025 · Avro 디코딩 실패 0** |
-| `seq` 결번 / 중복 | 0 / 0 | **0 / 0** |
-| 레코드 크기 | JSON 363 B | **Avro 161 B** |
-
-검증은 `exploration/scripts/verify_kafka.py`가 한다 — 토픽에서 직접 꺼내 이 문서의
-`.avsc`로 디코딩하고 결번·채널 분포·파티션 키를 대조한다. "게이트웨이가 보냈다"가 아니라
-**"저장 계층이 실제로 받았다"** 를 확인하는 것이 요점이다.
-
-```bash
-cd exploration
-PYTHONPATH=. .venv/bin/python scripts/verify_kafka.py --boot-id <boot_id> --vehicle vehicle-0001
-```
+[dlq-envelope.avsc](../schemas/dlq-envelope.avsc)는 실패한 원본 바이트와 오류 종류·상세·처리 단계·시각·재시도 횟수를 보관한다.
+오류 종류는 파싱, 스키마 검증, 업무 규칙, 저장 실패의 네 가지다.
 
 ---
 
 ## 6. 시간 계약
 
-센서 주기가 **943.8 Hz부터 2.0 Hz까지 472배** 범위에 걸쳐 있고 각자 다른 클럭을 쓴다. 어느
-카메라 프레임과 어느 LiDAR 스윕이 같은 순간인지 정의하지 않으면 조인이 성립하지 않는다.
+### 6.1 발생·기록·수신 시각의 분리
 
-### 6.1 타임스탬프 3종
+```mermaid
+sequenceDiagram
+    participant S as 센서
+    participant V as 차량 로컬 저장
+    participant C as 클라우드
+    S->>V: 관측 A (sensor_time = 12:00:00)
+    Note over V: log_time = 12:00:00.010<br/>연결 단절 중 보존
+    V->>C: 재연결 후 A 전송
+    Note over C: ingest_time = 12:00:30<br/>30초 전 관측을 지금 받은 것
+```
+
+발생·기록·수신 시각을 분리한다. 전송 지연 계산에는 센서와 서버의 시계 동기화가 필요하다.
 
 | 타임스탬프 | 부여 주체 | 용도 |
 |---|---|---|
 | `sensor_time` | 센서 자체 클럭 | **정본 시간축** — 파티션·정렬 기준 |
 | `log_time` | 온보드 기록 시점 | 온보드 버퍼링 지연 관측 |
-| `ingest_time` | 수신 시점 | 전송 지연 `ingest_time - sensor_time` |
+| `ingest_time` | 수신 시점 | 수신 이력, 시계 동기화 시 전송 지연 계산 |
 
-### 6.2 동기화 앵커 = 키프레임(2.06 Hz)
+### 6.2 키프레임 기준의 센서 시간 정렬
 
-nuScenes가 12센서를 정렬하는 단위이며 3D 라벨도 여기에만 붙는다. 센서 간 조인은 키프레임을
-기준으로 하고, 그 사이 고주파 신호는 해당 키프레임 구간에 귀속시킨다.
+`sample`은 가까운 시각의 센서 관측과 3D 주석을 연결한다.
+실제 결합에는 파일별 timestamp와 허용 시간 차이를 사용한다.
 
-### 6.3 지연 데이터는 폐기하지 않는다
+### 6.3 지연 이력의 저장과 현재 상태 반영 분리
 
-watermark를 넘겨 도착해도 `sensor_time` 파티션에 그대로 적재한다. 유실 0 요구와 정합하는
-유일한 선택이다.
+업로드 대상으로 수용한 이력은 원래 `sensor_time`으로 저장한다.
+`history` stream은 현재 경보 입력에서 제외하고, MQTT 상태 재전송도 발생 시각의 최신성을 검사한다.
+조회 API는 발생 시각을 기준으로 최신 좌표를 선택한다.
+
+보고 주기는 로컬 수신 시각으로 제어하고, 각 레코드에는 원래 센서 발생 시각을 유지한다.
+`history_request`의 구간 선택은 현재 로컬 ring 수신 시각 기준이다.
+Flink 최신성·미수신 판단은 보고 간격을 반영한다. 현 기본값과 시계 동기화 조건은 [SDD S-11](sdd.md)을 따른다.
 
 ---
 
@@ -489,125 +533,48 @@ watermark를 넘겨 도착해도 `sensor_time` 파티션에 그대로 적재한�
 
 ### 7.1 ENU → WGS84
 
-**`ego_pose.translation`은 위경도가 아니다.** 지역 지도의 **ENU(East-North-Up) 로컬 미터
-좌표**이고 `z`는 항상 0이다.
+`ego_pose.translation`은 지역 지도의 ENU 미터 좌표이며 `z = 0`이다.
+원본 좌표를 유지하면서 지도 표시용 `lat`/`lon`을 파생한다. 변환 실패 시 좌표만 null로 두고 행은 보존한다.
 
-| 계층 | 좌표 표현 |
-|---|---|
-| 원본 보존 | ENU 미터 **그대로** — 변환 오차를 원본에 섞지 않는다 |
-| 정제 | ENU 원본 **+** 파생 `lat`/`lon` (변환 실패 시 null, 행은 유지) |
+지역별 원점은 [geo.py](../exploration/fleetsentinel_ingest/geo.py)에 정의한다.
+GeoJSON에는 **`[lon, lat]` 순서**로 전달한다.
 
-원점은 각 지도의 **남서쪽 모서리**이며, `nuscenes-devkit` `map_expansion/map_api.py`의
-**공식 문서화 값**이다. 구현은 `exploration/fleetsentinel_ingest/geo.py`.
+### 7.2 센서 좌표 → 차량 좌표 → 지도 좌표
 
-| 지역 | 원점 (lat, lon) |
-|---|---|
-| boston-seaport | 42.336849169438615, -71.05785369873047 |
-| singapore-onenorth | 1.2882100868743724, 103.78475189208984 |
-| singapore-hollandvillage | 1.2993652317780957, 103.78217697143555 |
-| singapore-queenstown | 1.2782562240223188, 103.76741409301758 |
+```mermaid
+flowchart TD
+    P["센서 좌표<br/>LiDAR 점 x/y/z"] -->|"calibrated_sensor<br/>센서 장착 위치·회전"| E["ego 차량 좌표"]
+    E -->|"ego_pose<br/>관측 시각의 차량 위치·회전"| G["global 지도 좌표"]
+    A["객체 주석<br/>이미 global 좌표"] --> G
+    G -->|"지도 원점 + 좌표 변환"| W["WGS84 위경도<br/>지도 표시"]
+```
 
-**"보스턴 1.35배 스케일링"의 정체** — 커뮤니티에 떠도는 이 보정은
-**Web Mercator(EPSG:3857) 축척계수 `1/cos(lat)`** 이었다.
+**점군을 global로 옮긴 뒤 같은 좌표의 객체 박스와 비교한다.**
+객체 박스는 원천의 global 좌표를 사용한다.
+카메라에 겹쳐 그릴 때는 global에서 카메라 좌표로 역변환한 뒤 내부 파라미터로 픽셀에 투영한다.
 
-| 지역 | 원점 위도 | `1/cos(lat)` |
-|---|---|---|
-| boston-seaport | 42.34° | **1.3528** ← 보고된 "1.35" |
-| singapore 3곳 | ~1.29° | 1.0003 (사실상 1) |
+센서 외부 파라미터(extrinsics)는 차량에 장착된 센서의 위치와 회전을 나타낸다.
+점군과 객체 박스를 같은 좌표계로 정렬할 때 사용하며, 원본 파일의 `calibration`에 함께 보관한다.
 
-싱가포르는 적도 근처라 보정이 불필요했고 보스턴만 필요했던 것이다. **로컬 접평면 또는
-대권 방식으로 직접 변환하면 어떤 보정 상수도 필요 없다.**
-
-lat/lon 순서 규약 — GeoJSON은 `[lon, lat]`, 대부분의 지도 라이브러리와 DB 함수는
-`(lat, lon)` 또는 `(lon, lat)` 중 하나를 고정한다. **경계를 넘을 때마다 순서를 명시한다.**
-
-### 7.2 프레임이 셋이다 — 캘리브레이션이 필수
-
-| 데이터 | 프레임 | 뜻 |
-|---|---|---|
-| LiDAR·레이더 점군 | **센서 프레임** | 그 센서를 원점으로 한 좌표 |
-| 객체 3D 박스 | **글로벌 프레임** | 지도 원점 기준 ENU |
-| ego 자세 | 글로벌 프레임 | 지도 원점 기준 ENU |
-
-**센서 외부 파라미터(extrinsics)가 없으면 이 셋을 정렬할 수 없다.** 점군은 "LiDAR에서 몇 m"
-로 적혀 있고 박스는 "지도 원점에서 몇 m"로 적혀 있어, 차량에서 LiDAR가 어디에 어떤 각도로
-달렸는지를 알아야 둘을 겹칠 수 있다. 즉 원시 로그를 보관하더라도 캘리브레이션이 함께 없으면
-3D 재구성이 불가능하다. `segment-ref`의 `calibration` 필드(§5.3)가 이 문제의 답이다.
-
-카메라는 여기에 **내부 파라미터(intrinsics)** 도 필요하다 — 3D 점을 2D 픽셀로 투영하는
-3×3 행렬이며 초점거리·주점을 담는다.
+카메라 내부 파라미터(intrinsics)는 초점거리·주점을 담는 3×3 행렬이다.
+카메라 좌표의 3D 점을 이미지 픽셀로 투영할 때 사용한다.
 
 ---
 
 ## 8. 관제에서 해석할 때 주의할 원천 특성
 
-### 8.1 주석의 23.1%는 `num_lidar_pts = 0`이다
+### 8.1 객체 주석의 관측값과 분포
 
-`num_lidar_pts = 0`인 주석이 **18,538건 중 4,278건 (23.1%)** 이다. 이 값은 박스 안에서
-집계된 LiDAR 포인트 수이지 객체 인식의 신뢰도 점수가 아니다. 0이라는 이유만으로 품질 저하나
-센서 장애로 판정하면 안 된다.
+`num_lidar_pts`는 박스 안의 LiDAR 포인트 수다. mini 주석의 **23.1%가 0**이며,
+거리·가림을 고려해 정상 값으로 유지한다. `visibility`는 카메라에 보이는 비율의 구간이다.
 
-거리와의 관계가 물리적으로 일관된다 — ego 차량으로부터의 수평 거리 기준:
+클래스별로는 승용차와 성인 보행자가 **66.8%**를 차지한다. 클래스별 결과를 비교할 때 이 분포를 고려한다.
+레이더는 현재 원본 파일과 주석의 포인트 수를 보관한다.
 
-| | 건수 | 평균 거리 | 중앙값 |
-|---|---|---|---|
-| `num_lidar_pts = 0` | 4,278 | **48.6 m** | 45.8 m |
-| `num_lidar_pts > 0` | 14,260 | 27.9 m | 24.5 m |
+### 8.2 장면 설명에서 추출하는 환경 정보
 
-멀수록 LiDAR 빔이 닿지 않는다. 32빔 LiDAR의 각분해능 때문에 거리가 멀면 객체 사이를
-빔이 그냥 지나친다.
-
-레이더는 더 성기다 — **`num_radar_pts = 0`이 68.4%** 다. 레이더 페이로드는 아직 해석하지
-않으므로(SDD L-5) 현재는 원천 메타데이터로만 보존한다.
-
-`visibility`(카메라에 보이는 비율) 분포:
-
-| 등급 | 건수 | 비율 |
-|---|---|---|
-| `v80-100` | 9,475 | 51.1% |
-| `v0-40` | 5,480 | **29.6%** |
-| `v60-80` | 1,947 | 10.5% |
-| `v40-60` | 1,636 | 8.8% |
-
-이 값은 관제 화면에서 객체가 카메라에 얼마나 가려졌는지 설명하는 보조 정보로 쓸 수 있다.
-
-클래스 분포(상위 8종, 총 18,538건):
-
-| 클래스 | 건수 | 비율 |
-|---|---|---|
-| `vehicle.car` | 7,619 | 41.1% |
-| `human.pedestrian.adult` | 4,765 | 25.7% |
-| `movable_object.barrier` | 2,323 | 12.5% |
-| `movable_object.trafficcone` | 1,378 | 7.4% |
-| `vehicle.truck` | 649 | 3.5% |
-| `vehicle.motorcycle` | 471 | 2.5% |
-| `vehicle.bus.rigid` | 353 | 1.9% |
-| `vehicle.bicycle` | 243 | 1.3% |
-
-상위 2종이 전체의 **66.8%**다. 따라서 클래스별 객체 수를 비교할 때 원천 분포가 균등하다고
-가정하면 안 된다.
-
-### 8.2 장면 설명 태그가 희소하다
-
-`scene.description`은 자유 텍스트다(예: `"Night, after rain, many peds, PMD, ped with bag,
-jaywalker, truck, scooter"`). mini 10장면에서 45종의 서로 다른 토큰이 나오지만 두 축이 약하다.
-
-| 축 | mini 10장면 |
-|---|---|
-| 야간(`night`) | **3 / 10** |
-| `rain` 문자열 포함 | 1 / 10 |
-| **활성 강우** | **0 / 10** |
-| **주간 명시** | **0 / 10** |
-
-- **`day`는 명시되지 않는다.** "Night"만 기재되므로 주간은 *"night이 없으므로 day"* 라는
-  **부정 추론**이다. 그렇게 기록해야 한다.
-- **`after rain` ≠ 활성 강우.** `rain`을 포함하는 유일한 장면 scene-1094가
-  `"Night, after rain"` 이다 — 노면은 젖었지만 비는 오지 않는다. 따라서 **활성 강우는
-  0건**이고, 정규식도 **부정 후방탐색**이 필요하다(`(?<!after\s)rain` — 전방탐색으로 짜면
-  "after rain"을 활성 강우로 오분류한다).
-
-따라서 mini 데이터만으로는 활성 강우 조건을 검증할 수 없다. 관제 화면의 조건 검색은 이
-한계를 그대로 표시해야 하며, `after rain`을 현재 비가 오는 상황으로 분류해서는 안 된다.
+`scene.description`은 자유 텍스트다. 기록된 조건과 태그 부재에서 추정한 조건을 구분한다.
+예를 들어 `after rain`은 **강우 후**로 분류하고, 현재 강우 여부는 별도로 확인한다.
 
 ### 8.3 검증 규칙
 
@@ -617,113 +584,117 @@ jaywalker, truck, scooter"`). mini 10장면에서 45종의 서로 다른 토큰�
 | 속도 >= 0 | 신호 | `BUSINESS_RULE_FAILURE` → DLQ |
 | 쿼터니언 \|q\| ≈ 1 | 신호·객체 메타데이터 | `BUSINESS_RULE_FAILURE` → DLQ |
 | 박스 크기 > 0 | 객체 메타데이터 | `BUSINESS_RULE_FAILURE` → DLQ |
-| `sensor_time` 단조성 (차량별) | 신호 | 경고 태그 — **폐기 안 함**(무손실) |
+| `sensor_time` 단조성 (차량별) | 신호 | 경고 태그와 함께 행 유지 |
 | `num_lidar_pts` = 0 | 객체 메타데이터 | 정상 값으로 행 유지 |
 | 키프레임에 12센서 미충족 | 원시 | 세그먼트에 센서 결손 플래그 |
 | `checksum` 불일치 | 원시 | `SINK_WRITE_FAILURE` → 재업로드 |
 
 ---
 
-## 9. 이 데이터를 무엇에 쓰는가
+## 9. 저장 구조와 조회 용도
 
-| 계층 | 쓰이는 곳 |
-|---|---|
-| 신호: 자세·lat/lon | 차량 위치·궤적 표시, ODD 경계 판정, 타임스탬프 역전 검출 |
-| 신호: 속도·가속도 | 급제동 이벤트, 차량 상태 표시, 물리 범위 검증 |
-| 신호: 조향·yaw rate | 차량 거동 확인 |
-| 객체: 박스·클래스 | 주변 객체 위치 표시, 객체 수·클래스 분포 조회 |
-| 객체: `track_id` | 프레임이 바뀌어도 같은 객체의 이동을 연결 |
-| 객체: `visibility`·`num_lidar_pts` | 원천 주석의 관측 상태 표시 |
-| 원시: 카메라·LiDAR·레이더 | 경보 발생 구간 재생, 센서 결손 확인 |
-| `segment-ref` | 사건 검색 결과에서 원본 클립을 여는 참조 |
+### 9.1 ClickHouse 테이블과 조회 뷰
 
-목표는 차량 상태를 실시간으로 확인하고, 경보가 발생했을 때 관련 신호와 원본 센서 구간을
-같이 찾는 것이다. 이를 위해 경량 데이터는 ClickHouse에서 조회할 수 있게 저장하고,
-`segment-ref`로 오브젝트 스토리지의 MCAP 원본을 연결한다.
+현재 [ClickHouse DDL](../infra/clickhouse/001-schema.sql)을 기준으로 주요 컬럼을 표시했다.
+세 테이블은 각각 신호·객체·원본 파일 참조를 저장한다.
+
+세 테이블은 공통으로 `vehicle_id`, `boot_id`, `seq`, `ingest_time`을 갖는다.
+아래는 데이터 종류별 주요 컬럼이다.
+
+```mermaid
+erDiagram
+    signals_raw {
+        String channel
+        DateTime64 sensor_time
+        DateTime64 log_time
+        Map values_num
+        Map values_vec
+        Map values_str
+        Float64 lat_lon "Nullable, 2개 컬럼"
+    }
+    perception_raw {
+        String sample_id
+        String track_id
+        String category
+        DateTime64 sensor_time
+        Float64 center_x_y_z "3개 컬럼"
+        Float64 size_w_l_h "3개 컬럼"
+        Float64 rot_w_x_y_z "4개 컬럼"
+        String visibility
+        Int32 num_lidar_pts
+        Int32 num_radar_pts
+    }
+    segments_raw {
+        String segment_id
+        String blob_uri
+        DateTime64 t_start
+        DateTime64 t_end
+        Array sensor_channels
+        UInt64 size_bytes
+        String checksum
+        Enum8 state "UPLOADED 또는 DROPPED"
+        String drop_reason "Nullable"
+        Map calibration
+    }
+```
+
+공통 엔진은 `ReplacingMergeTree(ingest_time)`, 정렬 키는 `(vehicle_id, boot_id, seq)`다.
+신호·객체는 `sensor_time`, 세그먼트는 `t_start`의 날짜로 파티셔닝한다.
+같은 레코드의 재수신은 정렬 키로 식별하고, 조회 뷰에서 `FINAL`을 적용한다.
+그림의 좌표·크기·회전 필드는 묶어 표시했다. 전체 컬럼과 타입은 DDL을 따른다.
+
+```mermaid
+flowchart LR
+    S["signals_raw"] -->|"SELECT ... FINAL"| SV["fleet.signals"]
+    P["perception_raw"] -->|"SELECT ... FINAL"| PV["fleet.perception"]
+    R["segments_raw"] -->|"SELECT ... FINAL"| RV["fleet.segments"]
+    SV --> STATE["위치·궤적·속도·조향 조회"]
+    PV --> OBJECT["주변 객체·클래스·관측 상태 조회"]
+    RV --> CLIP["사건 구간과 원본 파일 검색"]
+    CLIP -->|"blob_uri"| MCAP["오브젝트 스토리지<br/>MCAP 재생"]
+```
 
 ---
 
 ## 10. 검증
 
-측정과 검증은 재현 가능해야 한다. 도구는 `exploration/`에 있고, 그 디렉터리는
-**파이프라인 구현이 아니라 이 문서의 근거를 만드는 측정 도구**다.
-
-```bash
-cd exploration
-PYTHONPATH=. .venv/bin/python scripts/measure_dataset.py --dataroot ../data/nuscenes
-```
+기존 검증 결과와 범위를 요약했다. 측정·MCAP 검증 명령은 [탐색 도구 안내](../exploration/README.md#실행)에 있다.
 
 ### 10.1 좌표 변환
 
-| 검사 | 결과 |
-|---|---|
-| ENU→WGS84→ENU 왕복 | 계약 점 4종 × 지역 4곳에서 **최대 0.024 mm** (임계 1 mm). 단 **원점 1 m 이내에서는 약 3 mm까지** 나빠진다 — 역변환의 `acos` 인자가 1에 극히 가까워 파국적 상쇄가 일어난다. 파이프라인은 정방향만 쓰므로 영향이 없고, 왕복은 검증 전용이다 |
-| 지도 래스터 범위 대조 (10px/m) | **10/10 장면**이 범위 내 — 원점·스케일 정합 |
-| 거리 보존 (haversine 대 ENU) | 오차 **≤ 0.014%** |
-| 독립 구현 교차 대조 | 최대 편차 **36cm** (싱가포르 2cm) |
-| 계약 테스트 | pytest **30건** + Flink 포팅 대조 **4건**(무작위 624 케이스 위경도 일치) |
+mini 10장면의 좌표가 지도 범위 안에 들어왔고, 거리 보존 오차는 0.014% 이하였다.
+ENU↔WGS84 왕복 오차는 계약 점에서 최대 0.024mm, 원점 1m 이내에서는 약 3mm였다.
+Python·Flink 구현은 624개 좌표의 변환 결과를 대조했다.
 
 ### 10.2 무손실 보존
 
-원시 센서 전량이 담겼는지 정본(`sample_data`)과 대조한다.
+`verify_mcap.py`로 MCAP의 원시 센서 파일 수를 원천 `sample_data`와 대조한다.
+기존 검증에서는 scene-0061·0103·0553의 **총 9,197개 파일**이 일치했다.
+대상에는 키프레임과 스윕을 모두 포함한다.
 
-| 장면 | 담긴 수 | 정본 | 판정 |
-|---|---|---|---|
-| scene-0061 | 2,963 (키프레임 468 + 스윕 2,495) | 2,963 | ✅ |
-| scene-0103 | 3,063 (480 + 2,583) | 3,063 | ✅ |
-| scene-0553 | 3,171 (492 + 2,679) | 3,171 | ✅ |
+### 10.3 좌표 변환과 박스 축 순서 검증
 
-초기 구현이 **키프레임만 담아 86%를 누락**했던 이력이 있다. 무손실 주장이 검증 없이 통과한
-경로였으므로 상설 게이트를 붙였다 — `verify_mcap.py <dir> <dataroot>`.
+3D 박스 안의 LiDAR 포인트를 세어 원천 라벨의 `num_lidar_pts`와 대조했다.
+76개 객체에서 **31,911개 포인트**가 일치했다.
 
-### 10.3 좌표 체인 종단 검증 (결정적)
+박스 크기는 `(width, length, height)` 순서다.
+박스 로컬 x축은 길이 방향이므로 좌표 계산의 반크기는 **`(length/2, width/2, height/2)`**를 사용한다.
 
-3D 박스 안의 LiDAR 포인트를 직접 세어 nuScenes 라벨의 `num_lidar_pts`와 대조했다.
+### 10.4 추가 검증 항목
 
-| 박스 축 순서 | 객체 | 총 오차 |
-|---|---|---|
-| **(l/2, w/2, h/2)** | 76건 | **0 / 31,911 = 0.0%** |
-| (w/2, l/2, h/2) | 76건 | 18,508 / 31,911 = 58.0% |
-
-**31,911개 포인트에 오차 0** — 근사가 아니라 정확한 일치다. 이 값이 맞으려면
-`센서 프레임 → 캘리브레이션 → ego 자세 → 글로벌 → 박스 로컬` **다섯 단계가 전부**
-정확해야 한다. 한 링크만 틀려도 일치하지 않으므로, **육안 확인 없이 좌표 체인 전체를
-기계적으로 증명**할 수 있다.
-
-부수 확정 — `size = (width, length, height)`이고 박스 로컬 x축은 길이 방향이다.
-`vehicle.car` 348건 중앙값이 폭 1.94m / 길이 4.70m / 높이 1.65m로 실제 승용차 치수와 맞는다.
-
-### 10.4 검증하지 않은 것
-
-- **full 데이터셋(1,000장면) 규모** — mini로만 측정했다. 전체 약 535GB는 공개 스펙이며
-  이 문서가 측정한 값이 아니다
-- **조향각 물리 범위의 경계값** — mini에서 [-5.13, 5.48] rad이나 full 범위는 미측정.
-  DLQ 규칙의 임계값은 full 측정 후 확정한다
-- 나머지 7개 장면의 기하 검증 — 동일 파이프라인이라 일반화했으나 전수는 아님
-- 레이더 `.pcd` 페이로드 해석 — 형식만 확인하고 디코딩은 미구현
+- full 데이터셋의 채널별 발생량과 조향각 범위 측정.
+- 나머지 7장면의 좌표 변환·박스 내 포인트 수 대조.
+- 레이더 PCD 디코딩과 좌표 변환 검증.
 
 ---
 
-## 11. 이 문서 밖의 것
+## 11. 관련 설계 문서
 
-데이터가 아니라 **설계**에 속하는 것들이다. 여기서 다루지 않는다.
-
-| 주제 | 어디에 |
-|---|---|
-| 전송 단위·유실 방지 | **결정** — 레코드 단위 + 온보드 WAL. [`wal-design.md`](wal-design.md) |
-| ack·중복 제거 | **결정** — CACK + `seq` 슬라이딩 윈도우. [`ack-dedup-design.md`](ack-dedup-design.md) |
-| 프로토콜 | **결정** — 고주파 gRPC 스트림(mTLS), 저주파 MQTT, 중량 HTTPS multipart(S3 호환). [`ingestion-design-review.md`](ingestion-design-review.md) §4.6·§4.8 |
-| 신원·인증 | **결정** — `vehicle_id`를 클라이언트 인증서 SAN에서만 취한다. [`sdd.md`](sdd.md) S-9 |
-| 직렬화 포맷 | **결정** — Avro. `schemas/*.avsc` (§5.5에서 계약과 정합 확인) |
-| 메시지 경계(객체 배열 vs 객체 단위) | 미정 — 전송 설계 |
-| 관제 화면·시각화 도구 | **구현** — React + MapLibre + uPlot + Rerun. [`frontend-tech-notes.md`](frontend-tech-notes.md) |
-| Kafka 토픽 구성 | **결정** — `telemetry.records` **하나**. 계층별로 나누면 `seq` 단일 수열이 조각나 dedup 이 연속성을 볼 수 없다(§5.0). 계층 구분은 `kind` 헤더, 분기는 Flink 이후 |
-| 저장 계층 테이블 정의·파티션·정렬 키 | **결정** — `infra/clickhouse/001-schema.sql`. `ReplacingMergeTree` + `ORDER BY (vehicle_id, boot_id, seq)` + **`FINAL` 뷰** |
-| 중량 경로(원시 → 오브젝트 스토리지) | **설계** — presigned URL 인가·키 스킴·multipart·고아 방지. [`sdd.md`](sdd.md) S-1·S-2·S-6, 구현은 `gateway/…/SegmentUploadService` |
-| 보존 기간·수명주기 | 미정 |
-
-**§5의 필드 계약은 데이터 사실이고, "바이트로 어떻게 만드는가"는 전송 설계다.** 직렬화
-포맷이 Avro로 정해졌지만 그 결정의 근거는 이 문서가 아니라 전송 설계에 있다.
+- **전송 정책과 아키텍처:** [SDD](sdd.md) · [MQTT 전환 설계](mqtt-migration.md).
+- **배치·ACK·로컬 보존:** [MQTT 수집 계약](mqtt-contract.md).
+- **기존 gRPC 경로:** [SDD §3 S-7](sdd.md)의 유지 범위와 복구 계약.
+- **직렬화:** `schemas/*.avsc`의 Avro 정의.
+- **저장 계층:** [ClickHouse 테이블·뷰 DDL](../infra/clickhouse/001-schema.sql).
 
 ---
 
@@ -733,4 +704,3 @@ PYTHONPATH=. .venv/bin/python scripts/measure_dataset.py --dataroot ../data/nusc
 - [nuScenes 공식 사이트](https://www.nuscenes.org/) · [스키마 정의](https://github.com/nutonomy/nuscenes-devkit/blob/master/docs/schema_nuscenes.md)
 - [CAN bus 확장](https://github.com/nutonomy/nuscenes-devkit/blob/master/python-sdk/nuscenes/can_bus/README.md)
 - [map_api.py — 지도 원점 좌표](https://github.com/nutonomy/nuscenes-devkit/blob/master/python-sdk/nuscenes/map_expansion/map_api.py)
-- [nuPlan (연속 로그 상위 원천)](https://www.nuscenes.org/nuplan)

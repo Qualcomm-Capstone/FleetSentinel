@@ -38,7 +38,7 @@ spring:
         # 파티션 내 순서가 유지된다 — 처리량을 포기하지 않고 CACK을 쓸 수 있다.
         max.in.flight.requests.per.connection: 5
         # 전송 계층 배치. 계약은 레코드 단위로 두고 배치는 여기서 얻는다
-        # (ingestion-design-review.md §4.8.1).
+        # (docs/sdd.md S-7).
         linger.ms: 20
         batch.size: 65536
         compression.type: lz4

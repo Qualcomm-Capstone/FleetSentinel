@@ -1,12 +1,11 @@
 """온보드 WAL — 전송 전 durability를 위한 append-only 로컬 스풀.
 
-설계 정본은 `docs/wal-design.md`. 이 구현은 **재생기용 단순화 버전**이며 그 설계의
-핵심 성질을 실증하는 것이 목적이다:
+기존 gRPC 재생기의 로컬 보존 구현이다. 유지 범위는 `docs/sdd.md` S-7을 따른다.
 
-  W-1 전송 전 durable      → 그룹 커밋 fsync
-  W-2 재시작 시 재개       → 커밋 포인터
-  W-3 디스크 유한          → 세그먼트 롤링 + 삭제
-  W-6 손상 꼬리 복구       → 레코드별 CRC
+  영속화             → 그룹 커밋 fsync
+  재시작 시 재개     → 커밋 포인터
+  디스크 용량 제한   → 세그먼트 롤링 + 삭제
+  손상 꼬리 복구     → 레코드별 CRC
 
 ## 레코드 포맷
 
@@ -17,14 +16,12 @@
 `crc32`는 `seq + kind + payload`를 덮는다. 크래시 시점의 잘린 꼬리를 판별하는 유일한
 수단이고, **CRC 실패를 오류가 아니라 "꼬리를 찾았다"로 해석**해 그 지점에서 잘라낸다.
 
-`kind`로 경량 레코드와 `segment-ref`를 한 로그에 담는다(설계 §3.9 — WAL이 중량 경로의
-outbox 역할을 겸한다).
+`kind`로 경량 레코드와 `segment-ref`를 한 로그에 담는다.
 
 ## at-least-once면 충분하다
 
-커밋 포인터가 뒤처져 있으면 재시작 후 이미 보낸 것을 다시 보낸다. 그건 중복이고 하류
-`event_id` dedup이 흡수한다. WAL에서 exactly-once를 만들려 하면 복잡해지는데 이미 dedup
-계층이 있으므로 그럴 필요가 없다 — 계층별 책임 분리.
+커밋 포인터가 뒤처져 있으면 재시작 후 이미 보낸 것을 다시 보낸다.
+하류는 차량·boot·seq 식별자로 재전송 중복을 처리한다.
 """
 
 from __future__ import annotations
@@ -53,7 +50,7 @@ DROPPED_FILE = "DROPPED"
 DROPPED_BODY = struct.Struct("<QQ")
 DROPPED_RECORD = struct.Struct("<QQI")
 
-# 기본값. 재생기용이라 설계 문서(64MB / 10ms)보다 작게 잡아 테스트가 빠르다.
+# 재생기용 기본값. 테스트에서 세그먼트 롤링을 확인할 수 있도록 작게 잡는다.
 DEFAULT_SEGMENT_BYTES = 4 * 1024 * 1024
 DEFAULT_COMMIT_INTERVAL_S = 0.010
 DEFAULT_COMMIT_BYTES = 4 * 1024
@@ -68,7 +65,7 @@ class WalRecord:
 
 @dataclass(frozen=True, slots=True)
 class WalStats:
-    """관측 지표. 적체량이 곧 "네트워크가 못 따라간다"의 신호다(설계 §3.7)."""
+    """로컬 보존량·fsync 횟수·삭제 범위 관측 지표."""
 
     appended: int
     committed_seq: int
@@ -86,7 +83,7 @@ class Wal:
     :param root: 로그 디렉터리
     :param segment_bytes: 세그먼트 롤링 임계
     :param commit_interval_s: 그룹 커밋 주기. 전원 손실 시 최대 이 구간이 날아간다
-    :param max_disk_bytes: 상한. 초과 시 **가장 오래된 세그먼트를 버린다**(설계 §3.6) —
+    :param max_disk_bytes: 상한. 초과 시 **가장 오래된 세그먼트를 버린다** —
         쓰기를 막으면 센서 계층으로 역전파돼 프로토콜 바깥에서 조용히 사라지는데,
         버리는 쪽은 `seq` 결번으로 탐지 가능하다
     """
@@ -163,7 +160,7 @@ class Wal:
         """레코드를 추가하고 발급된 `seq`를 돌려준다.
 
         **센서 콜백을 막지 않는다** — 버퍼에 쓰고 조건이 되면 fsync한다. fsync를 매번 하면
-        초당 1,295회가 되어 eMMC가 버티지 못한다(설계 §3.3).
+        입력 발생률만큼 디스크 동기화를 요청하므로 그룹 커밋으로 빈도를 제한한다.
         """
         with self._lock:
             seq = self._next_seq
@@ -280,7 +277,7 @@ class Wal:
         for rec, end in _scan_segment_with_offset(last):
             valid_end = end
             last_seq = rec.seq
-        # 손상된 꼬리를 잘라낸다. 이게 W-6을 닫는다.
+        # 손상된 꼬리를 잘라낸다.
         if valid_end < last.stat().st_size:
             with open(last, "r+b") as f:
                 f.truncate(valid_end)
@@ -358,7 +355,7 @@ class Wal:
         return sorted(self.root.glob(f"*{SEGMENT_SUFFIX}"))
 
     def _truncate_before(self, seq: int) -> None:
-        """세그먼트를 **파일 통째로** 삭제해 회수한다(설계 §3.2).
+        """세그먼트를 **파일 통째로** 삭제해 회수한다.
 
         마지막 레코드의 `seq`가 커밋 지점 이하인 세그먼트만 지운다. 활성 세그먼트는
         건드리지 않는다.

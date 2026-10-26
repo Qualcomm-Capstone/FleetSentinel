@@ -7,7 +7,7 @@ import { mockStreamPlugin } from "./server/mockStream";
 //   기본           목업 스트림 — 인프라 없이 돈다. 실 nuScenes 픽스처를 재생하므로
 //                  난수가 아니고 화면·성능은 실제와 같다
 //   VITE_API=...   실 API — Spring Boot(ClickHouse 질의 + SSE). 파이프라인이
-//                  돌고 있어야 한다(RUN.md)
+//                  실행 중이어야 한다.
 //
 // **프론트 코드는 어느 쪽인지 모른다.** 경로(/api/...)와 응답 형태가 같아서
 // 여기 프록시만 바꾸면 된다 — 그게 API 를 목업 계약에 맞춘 이유다.

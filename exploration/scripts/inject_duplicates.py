@@ -18,7 +18,7 @@ ap.add_argument("--n", type=int, default=500)
 ap.add_argument("--from-tail", action="store_true",
                 help="토픽 끝에서 가져온다 — **현재 boot_id** 의 레코드라야 현실적인 "
                      "재전송 시나리오가 된다. 앞에서 가져오면 옛 boot_id 라 dedup 이 "
-                     "BOOT_RESET 으로 통과시킨다(ack-dedup-design.md A-L4)")
+                     "BOOT_RESET 으로 통과시킨다")
 args = ap.parse_args()
 
 c = Consumer({"bootstrap.servers": args.brokers, "group.id": "dup-injector",

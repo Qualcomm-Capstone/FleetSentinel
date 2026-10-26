@@ -26,7 +26,7 @@ message IngestRecord {
 
   // WAL 프레임의 kind 바이트와는 값이 다르다. proto3는 enum 0을 UNSPECIFIED로
   // 예약하므로 정렬시킬 수 없다. WAL의 온디스크 포맷은 이미 검증된 계약이라
-  // (wal-design.md §2) 그쪽을 바꾸지 않고, 클라이언트가 한 곳에서 매핑한다
+  // 기존 값을 유지하고 클라이언트가 한 곳에서 매핑한다
   // — fleetsentinel_ingest/grpc_transport.py 의 _KIND_TO_WIRE.
   //
   //   WAL 0 (SIGNAL)      → RECORD_KIND_SIGNAL      (1)

@@ -42,7 +42,7 @@ __all__ = [
 ]
 
 #: WAL의 kind 바이트. `wal.py`가 0·1만 정의하므로 객체 메타데이터 계층을 여기서 넓힌다.
-#: 온디스크 포맷은 검증된 계약이라(wal-design.md §2) 기존 값을 바꾸지 않는다.
+#: 기존 WAL 파일과의 호환성을 위해 kind 값을 바꾸지 않는다.
 KIND_PERCEPTION = 2
 
 #: WAL kind → proto enum. proto3는 enum 0을 UNSPECIFIED로 예약하므로 값이 어긋난다.

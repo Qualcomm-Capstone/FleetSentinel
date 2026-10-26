@@ -33,8 +33,7 @@ management:
 
 fleetsentinel:
   api:
-    # SSE 푸시 주기. 프론트가 4Hz 로 화면을 갱신하므로(frontend-tech-notes Q5)
-    # 그보다 빠르게 보낼 이유가 없다.
+    # SSE 푸시 주기. 기본값은 250ms(4Hz).
     push-interval-ms: 250
     # 한 번에 밀어 넣을 신호 레코드 수 상한. 초당 1,308건이 들어오므로
     # 무제한이면 브라우저가 먼저 무너진다.

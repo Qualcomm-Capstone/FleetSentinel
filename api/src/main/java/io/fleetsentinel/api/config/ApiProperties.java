@@ -6,8 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class ApiProperties {
 
     /**
-     * SSE 푸시 주기(ms). 프론트가 4Hz 로 화면을 갱신하므로 그보다 빠르게 보낼 이유가 없다
-     * (frontend-tech-notes Q5 — 사람이 "살아있다"고 느끼는 최소치).
+     * SSE 푸시 주기(ms). 기본값은 250ms(4Hz).
      */
     private long pushIntervalMs = 250;
 

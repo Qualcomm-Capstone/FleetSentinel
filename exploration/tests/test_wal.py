@@ -1,4 +1,4 @@
-"""WAL 계약 검증 — docs/wal-design.md 의 W-1·W-2·W-3·W-6.
+"""기존 gRPC WAL의 영속화·재시작·용량 제한·손상 꼬리 복구 검증.
 
 핵심은 `test_survives_sigkill_without_gaps` 다. 임의 시점에 프로세스를 강제 종료하고
 재시작해 `seq` 결번이 없는지 확인한다. 중복은 허용한다 — WAL은 at-least-once면 충분하고

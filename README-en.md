@@ -14,7 +14,7 @@ states in a fleet console.
 ![React](https://img.shields.io/badge/React-61DAFB?style=flat-square&logo=react&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
 
-Docs (Korean): [System Design Document](docs/sdd.md) · [Data Design](docs/data-design.md) · [Frontend tech notes](docs/frontend-tech-notes.md) · [Ingestion design review](docs/ingestion-design-review.md) · [WAL design](docs/wal-design.md) · [Ack & dedup design](docs/ack-dedup-design.md) · [Runbook](RUN.md)
+Docs (Korean): [System Design](docs/sdd.md) · [Data Design](docs/data-design.md) · [MQTT Migration](docs/mqtt-migration.md) · [MQTT Collection Contract](docs/mqtt-contract.md)
 
 ## Background
 
@@ -30,7 +30,7 @@ Data from a single autonomous vehicle includes **signals** (CAN, IMU, steering),
 These data types have different transfer sizes and message rates, so they use separate paths.
 
 1. Raw sensor data uses 58× more bandwidth than signals, while signals produce 8× more messages.
-2. One vehicle's raw output exceeds practical LTE throughput, so it cannot be streamed continuously.
+2. Continuous raw uploads increase network and cloud costs; event- and request-based uploads limit the selected data.
 
 The input data was collected from **2 vehicles**, and the longest continuous stretch is about
 20 seconds. In this repository, **"N vehicles" means N concurrent streams**.
@@ -39,7 +39,9 @@ Measured figures (rates, sizes, formats, and per-channel detail) are listed in [
 
 ## Architecture
 
-![FleetSentinel system architecture](docs/assets/fleetsentinel-architecture.png)
+The current path is selective collection → SQLite outbox → MQTT → bridge → Kafka.
+MQTT also carries collection policies and command results. Existing gRPC ingestion and raw-upload control remain available.
+See [System Design](docs/sdd.md) for the current architecture. Cloud HA and fleet-scale capacity are not yet validated.
 
 Signals and object metadata go through Kafka and Flink. Raw sensor files go to object storage, with
 references recorded in Kafka. ClickHouse's clip catalog connects the two paths.
@@ -49,12 +51,12 @@ references recorded in Kafka. ClickHouse's clip catalog connects the two paths.
 | Problem | Solution |
 |---|---|
 | 58× bandwidth asymmetry | **Claim-Check** — references on the bus, payloads in storage |
-| Not even one vehicle can stream continuously | **Triggered clips** — onboard ring buffer, upload ±20s around events |
-| Recovery after an interrupted upload | **Per-record gRPC stream + onboard WAL** ([WAL](docs/wal-design.md)) |
+| Continuous raw-upload cost | **Event/request-based clips** — file upload is implemented; real-vehicle triggers and automatic retention remain open |
+| Recovery after an interrupted upload | **MQTT + SQLite outbox + application ACK**, with legacy gRPC WAL/CACK retained |
 | Sensor rates span hundreds-fold | **Three timestamps** + keyframe synchronization anchor |
 | Coordinates are not lat/lon | **Official-origin ENU→WGS84 conversion** |
 | Raw logs must replay standalone | **MCAP with embedded calibration** |
-| Duplicate delivery and gap detection | **Cumulative Acknowledgement (CACK) + `seq` sliding-window dedup** ([design](docs/ack-dedup-design.md)) |
+| Duplicate delivery and gap detection | **Kafka storage acknowledgement + stable record identity and deduplication** ([design](docs/sdd.md)) |
 | ODD exits must be visible immediately | **Flink keyed state/timer → Kafka alert → API SSE** |
 | Operators need the source around an alert | **Clip catalog `blob_uri` → object-storage replay** |
 
@@ -62,6 +64,7 @@ references recorded in Kafka. ClickHouse's clip catalog connects the two paths.
 
 | Layer | Technology | Role |
 |---|---|---|
+| Vehicle communication | MQTT 5 · SQLite | Selective reporting, commands and durable unacknowledged uploads |
 | Ingest and buffering | Apache Kafka | Buffers vehicle records, fans them out to processing and storage, and supports replay |
 | Stream processing | Apache Flink | Maintains per-vehicle state for deduplication, validation, coordinate conversion, and ODD detection |
 | Raw storage | Object storage + MCAP | Stores large sensor clips as files for later replay |
@@ -77,10 +80,10 @@ storage. The two paths are connected by the clip ID and `blob_uri`.
 Current scope and limitations are listed in [SDD §4.2](docs/sdd.md).
 
 - **Not live monitoring.** nuScenes replay reproduces bandwidth, cadence, and format, but there is no real-vehicle integration.
-- **Vehicle-side loss prevention was verified in the replayer only.** WAL, ack, and dedup are implemented and survive SIGKILL with zero `seq` gaps, but real onboard software is out of scope, and the power-loss window (10ms group commit) remains.
+- **Recovery is locally tested.** Legacy gRPC WAL and MQTT SQLite outbox have separate contracts. Real-device power loss, disk failures and inputs not yet durably accepted need additional validation.
 - **The console uses a mock stream by default.** `make dashboard` connects it to the real API, but Kafka→Flink→API latency and recovery have not been measured end to end.
 - **The source is 2 vehicles with a 20-second continuity ceiling.** "N vehicles" means N concurrent streams, not N distinct real vehicles.
-- **Infrastructure HA is out of scope.** A single-host 3-broker setup demonstrates broker-level failover only.
+- **Cloud HA is unverified.** Kafka broker-level failover was tested on one host; MQTT uses a single local broker. Host/zone failures and mass reconnection remain open.
 - **3D boxes come from nuScenes annotations.** They are not produced by the vehicle and are used only to show surrounding objects in the dashboard.
 - **Radar payloads unparsed** — `.pcd` files are stored in MCAP but not decoded or visualized.
 
@@ -97,24 +100,14 @@ FleetSentinel/
 └── docs/             # design documents
 ```
 
-## Running
+## Validation
 
-```bash
-make up        # start the local stack
-make topics    # bootstrap Kafka topics
-make smoke     # verify infrastructure
-make ha-demo   # Kafka HA broker-kill demo
-```
+Use `make mqtt-test` for collection policy, durability, ACK and command tests,
+`make mqtt-integration-test` for real MQTT/Kafka/ClickHouse integration,
+and `make flink-test` for Flink regressions.
 
-```bash
-cd exploration && ./setup-venv.sh && PYTHONPATH=. .venv/bin/python -m pytest tests/ -q   # 82 tests
-cd frontend && npm install && npm run dev      # console (mock SSE stream)
-```
-
-See [`exploration/README.md`](exploration/README.md) and [`frontend/README.md`](frontend/README.md).
-The `exploration/` directory mixes two things: measurement tools (not promotable to production)
-and the vehicle-side loss-prevention implementation (a faithful build of the documented design,
-minus real onboard hardware).
+Python dependencies and installation constraints are listed in [exploration](exploration/README.md).
+See [SDD §6](docs/sdd.md) for validation scope and limitations.
 
 ## License
 
