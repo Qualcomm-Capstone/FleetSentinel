@@ -35,8 +35,7 @@ fleetsentinel:
   api:
     # SSE 푸시 주기. 기본값은 250ms(4Hz).
     push-interval-ms: 250
-    # 한 번에 밀어 넣을 신호 레코드 수 상한. 초당 1,308건이 들어오므로
-    # 무제한이면 브라우저가 먼저 무너진다.
+    # 대시보드 재생 주기당 신호 레코드 상한.
     max-records-per-push: 200
   alerts:
     topic: ${ALERT_TOPIC:fleet.alerts}

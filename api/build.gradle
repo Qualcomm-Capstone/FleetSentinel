@@ -13,12 +13,15 @@ configurations.configureEach {
 
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-kafka'
     implementation 'com.clickhouse:clickhouse-jdbc:0.9.0:all'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testImplementation 'org.testcontainers:testcontainers:2.0.5'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
@@ -39,9 +42,10 @@ tasks.register('integrationTest', Test) {
     outputs.upToDateWhen { false }
     def databaseUrl = providers.gradleProperty('clickhouseTestUrl').orElse('')
     systemProperty 'clickhouse.test.url', databaseUrl.get()
-    doFirst {
-        if (databaseUrl.get().isBlank()) {
-            throw new GradleException('Provide -PclickhouseTestUrl for a disposable ClickHouse with infra/clickhouse/001-schema.sql applied.')
-        }
-    }
+    systemProperty 'clickhouse.test.schema', rootProject.file('infra/clickhouse/001-schema.sql').absolutePath
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('integrationTest')
 }

@@ -5,6 +5,7 @@ import io.fleetsentinel.api.model.ClipSummary;
 import io.fleetsentinel.api.model.PipelineHealth;
 import io.fleetsentinel.api.model.VehicleSummary;
 import java.util.List;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -27,7 +28,7 @@ public class QueryController {
 
     /** 클립 카탈로그. 검색 결과의 재생 진입점이다. */
     @GetMapping("/clips")
-    public List<ClipSummary> clips(@RequestParam(defaultValue = "100") int limit) {
+    public List<ClipSummary> clips(@RequestParam(defaultValue = "100") @Min(1) int limit) {
         return queries.clips(Math.min(limit, 1000));
     }
 

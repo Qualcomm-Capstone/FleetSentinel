@@ -2,23 +2,25 @@ package io.fleetsentinel.api.config;
 
 import lombok.Getter;
 import lombok.Setter;
+import jakarta.validation.constraints.Positive;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.validation.annotation.Validated;
 
 @Getter
 @Setter
 @ConfigurationProperties(prefix = "fleetsentinel.api")
+@Validated
 public class ApiProperties {
 
     /**
      * SSE 푸시 주기(ms). 기본값은 250ms(4Hz).
      */
+    @Positive
     private long pushIntervalMs = 250;
 
     /**
-     * 한 번에 밀어 넣을 신호 레코드 상한.
-     *
-     * <p>차량당 1,308 rec/s 가 들어온다. 무제한으로 밀면 <b>브라우저가 먼저 무너진다</b> —
-     * 서버가 아니라 클라이언트가 병목이다.
+     * 재생 주기당 전송하는 신호 레코드 상한.
      */
+    @Positive
     private int maxRecordsPerPush = 200;
 }
