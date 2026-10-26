@@ -23,15 +23,33 @@ public final class Decoded implements Serializable {
     private final Kind kind;
     private final String vehicleId;
     private final String bootId;
+    private final String sourceBootId;
     private final long seq;
     private final List<Object> columns;
+    private final String streamId;
+    private final long reportIntervalMs;
 
-    private Decoded(Kind kind, String vehicleId, String bootId, long seq, List<Object> columns) {
+    private Decoded(Kind kind, Envelope envelope, List<Object> columns) {
         this.kind = kind;
-        this.vehicleId = vehicleId;
-        this.bootId = bootId;
-        this.seq = seq;
+        this.vehicleId = envelope.vehicleId();
+        this.bootId = envelope.bootId();
+        this.sourceBootId = envelope.sourceBootId();
+        this.seq = envelope.seq();
         this.columns = columns;
+        this.streamId = envelope.streamId();
+        this.reportIntervalMs = envelope.reportIntervalMs();
+    }
+
+    public long freshnessMs(long legacyDefault) {
+        return Math.max(legacyDefault, reportIntervalMs * 3);
+    }
+
+    /** Historical backfill is storage-only. MQTT live observations require synchronized clocks. */
+    public boolean liveAt(long nowMs) {
+        if ("history".equals(streamId)) return false;
+        if (streamId == null || "legacy".equals(streamId)) return true;
+        long age = nowMs - eventTimeMillis();
+        return age >= -5_000 && age < freshnessMs(5_000);
     }
 
     public Kind kind() {
@@ -44,6 +62,10 @@ public final class Decoded implements Serializable {
 
     public String bootId() {
         return bootId;
+    }
+
+    public String sourceBootId() {
+        return sourceBootId == null ? bootId : sourceBootId;
     }
 
     public long seq() {
@@ -138,7 +160,7 @@ public final class Decoded implements Serializable {
         c.add(map(r, "values_str"));
         c.add(lat);
         c.add(lon);
-        return new Decoded(Kind.SIGNAL, env.vehicleId(), env.bootId(), env.seq(), c);
+        return new Decoded(Kind.SIGNAL, env, c);
     }
 
     /** ② 객체 메타데이터. 좌표가 글로벌 프레임이라 ego 지역을 알아야 파생할 수 있다. */
@@ -160,7 +182,7 @@ public final class Decoded implements Serializable {
         c.add(r.get("num_radar_pts"));
         c.add(lat);
         c.add(lon);
-        return new Decoded(Kind.PERCEPTION, env.vehicleId(), env.bootId(), env.seq(), c);
+        return new Decoded(Kind.PERCEPTION, env, c);
     }
 
     /** ③ 클립 참조. 파일은 오브젝트 스토리지에 있고 이건 보관증이다. */
@@ -178,7 +200,7 @@ public final class Decoded implements Serializable {
         c.add(str(r, "state"));
         c.add(str(r, "drop_reason"));
         c.add(map(r, "calibration"));
-        return new Decoded(Kind.SEGMENT, env.vehicleId(), env.bootId(), env.seq(), c);
+        return new Decoded(Kind.SEGMENT, env, c);
     }
 
     // ── Avro → JDBC 변환 ────────────────────────────────────────────────

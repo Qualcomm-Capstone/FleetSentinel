@@ -71,26 +71,27 @@ public class TelemetryQueries {
                 -- (ILLEGAL_AGGREGATION) — 장면별로 먼저 접고 차량별로 다시 접는다.
                 SELECT
                     vehicle_id,
-                    any(scene_id)                 AS scene_id,
-                    anyIf(location, location != '') AS location,
+                    argMax(scene_id, scene_time) AS scene_id,
+                    tupleElement(argMax(position, position_time), 3) AS location,
                     sum(n)                        AS n_records,
                     -- 장면 사이 공백이 며칠이라(data-design.md §3.2) 전체 스팬은 주행시간이
                     -- 아니다. **장면별 스팬의 합**이 실제 녹화 길이다.
                     sum(scene_ms)                 AS recorded_ms,
-                    anyLastIf(last_lat, last_lat != 0) AS last_lat,
-                    anyLastIf(last_lon, last_lon != 0) AS last_lon
+                    tupleElement(argMax(position, position_time), 1) AS last_lat,
+                    tupleElement(argMax(position, position_time), 2) AS last_lon
                 FROM (
                     SELECT
                         vehicle_id,
                         scene_id,
                         count()                                       AS n,
+                        max(sensor_time)                              AS scene_time,
                         dateDiff('millisecond', min(sensor_time),
                                                 max(sensor_time))     AS scene_ms,
-                        -- location 은 ego_pose 채널만 갖는다. 빈 값을 건너뛰고 집는다.
-                        anyIf(values_str['location'],
-                              values_str['location'] != '')           AS location,
-                        anyLastIf(lat, lat IS NOT NULL)               AS last_lat,
-                        anyLastIf(lon, lon IS NOT NULL)               AS last_lon
+                        -- MQTT history may arrive after live status. Arrival order is not freshness.
+                        -- Keep the coordinate pair/location from one observation; zero is valid.
+                        argMaxIf(tuple(lat, lon, values_str['location']), tuple(sensor_time, boot_id, seq),
+                                 lat IS NOT NULL AND lon IS NOT NULL) AS position,
+                        maxIf(sensor_time, lat IS NOT NULL AND lon IS NOT NULL) AS position_time
                     FROM fleet.signals
                     GROUP BY vehicle_id, scene_id
                 )

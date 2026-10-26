@@ -27,10 +27,12 @@ public final class VehicleMonitorFunction extends KeyedProcessFunction<String, D
 
     public static class State implements Serializable {
         public String boot;
+        public String sourceBoot;
         public String mission;
         public long seq;
         public long eventTime;
         public long deadline;
+        public long freshnessMs;
         public Long stoppedSince;
         public boolean stopAlert;
         public Boolean healthy;
@@ -47,7 +49,7 @@ public final class VehicleMonitorFunction extends KeyedProcessFunction<String, D
     }
 
     @Override public void processElement(Decoded value, Context ctx, Collector<AlertEvent> out) throws Exception {
-        if (!value.isVehicleMonitor()) return;
+        if (!value.isVehicleMonitor() || !value.liveAt(ctx.timerService().currentProcessingTime())) return;
         Double speed = value.signalNumber("speed_mps");
         Double active = value.signalNumber("mission_active");
         Double planned = value.signalNumber("planned_stop");
@@ -66,10 +68,13 @@ public final class VehicleMonitorFunction extends KeyedProcessFunction<String, D
         long now = ctx.timerService().currentProcessingTime();
         if (s == null) s = new State();
         if (s.deadline > 0) ctx.timerService().deleteProcessingTimeTimer(s.deadline);
-        boolean brokenContinuity = s.stale || (s.eventTime > 0 && eventTime - s.eventTime > staleAfterMs)
-                || !Objects.equals(s.boot, value.bootId()) || !Objects.equals(s.mission, mission);
+        long freshness = value.freshnessMs(staleAfterMs);
+        boolean brokenContinuity = s.stale || (s.eventTime > 0 && eventTime - s.eventTime >
+                Math.max(staleAfterMs, s.freshnessMs))
+                || !Objects.equals(s.sourceBoot, value.sourceBootId()) || !Objects.equals(s.mission, mission);
         boolean wasStale = s.stale;
         s.boot = value.bootId();
+        s.sourceBoot = value.sourceBootId();
         s.seq = value.seq();
         s.eventTime = eventTime;
         s.mission = mission;
@@ -102,7 +107,8 @@ public final class VehicleMonitorFunction extends KeyedProcessFunction<String, D
         if (healthy && Boolean.FALSE.equals(s.healthy)) emit(s, ctx.getCurrentKey(),
                 AlertEvent.Type.SENSOR_RECOVERED, AlertEvent.Severity.INFO, now, "필수 센서 정상 복귀 보고", out);
         s.healthy = healthy;
-        s.deadline = now + staleAfterMs;
+        s.freshnessMs = freshness;
+        s.deadline = now + freshness;
         ctx.timerService().registerProcessingTimeTimer(s.deadline);
         state.update(s);
     }

@@ -23,6 +23,7 @@ public class OddBoundaryFunction extends KeyedProcessFunction<String, Decoded, A
     private final long sustainedAfterMs;
     private final long freshForMs;
     private transient ValueState<Long> lastReceivedAt;
+    private transient ValueState<Long> lastFreshnessMs;
 
     private transient ValueState<Boolean> outside;
     private transient ValueState<String> location;
@@ -56,6 +57,7 @@ public class OddBoundaryFunction extends KeyedProcessFunction<String, Decoded, A
     @Override
     public void open(OpenContext openContext) {
         lastReceivedAt = getRuntimeContext().getState(new ValueStateDescriptor<>("odd-last-received", Long.class));
+        lastFreshnessMs = getRuntimeContext().getState(new ValueStateDescriptor<>("odd-freshness", Long.class));
         outside = getRuntimeContext().getState(new ValueStateDescriptor<>("odd-outside", Boolean.class));
         location = getRuntimeContext().getState(new ValueStateDescriptor<>("odd-location", String.class));
         pendingTimer = getRuntimeContext().getState(new ValueStateDescriptor<>("odd-timer", Long.class));
@@ -71,6 +73,7 @@ public class OddBoundaryFunction extends KeyedProcessFunction<String, Decoded, A
 
     @Override
     public void processElement(Decoded value, Context ctx, Collector<AlertEvent> out) throws Exception {
+        if (!value.liveAt(ctx.timerService().currentProcessingTime())) return;
         String currentLocation = value.signalLocation();
         Double latitude = value.latitude();
         Double longitude = value.longitude();
@@ -89,11 +92,13 @@ public class OddBoundaryFunction extends KeyedProcessFunction<String, Decoded, A
         lastEventTime.update(eventTime);
         Long received = lastReceivedAt.value();
         long now = ctx.timerService().currentProcessingTime();
-        if (received != null && now - received >= freshForMs) {
+        long previousFreshness = lastFreshnessMs.value() == null ? freshForMs : lastFreshnessMs.value();
+        if (received != null && now - received >= previousFreshness) {
             clearExcursion(ctx);
             outside.clear();
         }
         lastReceivedAt.update(now);
+        lastFreshnessMs.update(value.freshnessMs(freshForMs));
 
         String previousLocation = location.value();
         if (previousLocation != null && !Objects.equals(previousLocation, currentLocation)) {
@@ -139,7 +144,8 @@ public class OddBoundaryFunction extends KeyedProcessFunction<String, Decoded, A
             return;
         }
         Long received = lastReceivedAt.value();
-        if (received == null || ctx.timerService().currentProcessingTime() - received >= freshForMs) {
+        long freshness = lastFreshnessMs.value() == null ? freshForMs : lastFreshnessMs.value();
+        if (received == null || ctx.timerService().currentProcessingTime() - received >= freshness) {
             pendingTimer.clear();
             return;
         }

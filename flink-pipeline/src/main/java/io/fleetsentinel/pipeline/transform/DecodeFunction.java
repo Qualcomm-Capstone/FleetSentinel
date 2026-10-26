@@ -65,6 +65,11 @@ public class DecodeFunction extends ProcessFunction<Envelope, Decoded> {
      */
     @Override
     public void processElement(Envelope env, Context ctx, Collector<Decoded> out) {
+        if (env.validationError() != null) {
+            ruleFailed.inc();
+            dlq(ctx, env, ErrorClass.SCHEMA_VALIDATION_FAILURE, "envelope", env.validationError());
+            return;
+        }
         // 토픽이 아니라 kind 헤더로 분기한다. 토픽은 하나다(TelemetryPipeline 참조).
         String kind = env.kind();
         if (kind == null) {

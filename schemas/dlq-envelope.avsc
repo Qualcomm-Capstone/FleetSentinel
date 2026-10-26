@@ -2,12 +2,12 @@
   "type": "record",
   "name": "DlqEnvelope",
   "namespace": "io.fleetsentinel.telemetry.v1",
-  "doc": "Core Stream Job DLQ 격리 봉투 스키마(SDD §6.7). 원본 페이로드를 무손실 보존하고 실패 사유를 분류해 GCS dlq 싱크·재처리 CLI가 소비한다.",
+  "doc": "Flink Kafka DLQ 봉투. Kafka 메시지 하나에 Avro Object Container File 레코드 하나를 담아 writer schema와 원본을 함께 보존한다.",
   "fields": [
     {
       "name": "original_payload",
-      "type": "bytes",
-      "doc": "실패한 원본 메시지 바이트(Avro 디코드 실패 시에도 그대로 보존 — 무손실 원칙 G-1). 재처리 CLI가 수정 후 재발행 시 이 값을 기반으로 신규 telemetry-event.avsc 레코드를 재구성한다."
+      "type": ["bytes", "null"],
+      "doc": "실패한 Kafka value 원본. null value도 구분해 보존한다."
     },
     {
       "name": "error_class",
@@ -26,7 +26,7 @@
     {
       "name": "source_subscription",
       "type": "string",
-      "doc": "메시지를 수신한 Kafka 소스 식별자(consumer group/topic). 재발행 경로 추적용."
+      "doc": "원본 Kafka topic."
     },
     {
       "name": "pipeline_step",
@@ -44,7 +44,24 @@
     {
       "name": "attempt",
       "type": "int",
-      "doc": "해당 메시지의 누적 처리(재시도) 시도 횟수, 1부터 시작. 재시도 상한 도달 여부 판단에 사용(SDD §5.2 ES 재시도 상한과 유사한 bound 원칙)."
-    }
+      "doc": "처리 시도 횟수. 현재 첫 격리는 1로 기록하며 자동 재처리 CLI는 제공하지 않는다."
+    },
+    {"name": "format_version", "type": "int", "default": 1},
+    {"name": "source_partition", "type": ["null", "int"], "default": null},
+    {"name": "source_offset", "type": ["null", "long"], "default": null},
+    {"name": "source_key", "type": ["null", "bytes"], "default": null},
+    {"name": "source_headers", "type": {"type": "array", "items": {
+      "type": "record", "name": "KafkaHeader", "fields": [
+        {"name": "key", "type": "string"},
+        {"name": "value", "type": ["null", "bytes"], "default": null}
+      ]
+    }}, "default": [], "doc": "순서·중복 키·null 값을 포함한 원본 헤더. 잘못된 헤더는 수정 후 별도 재처리 경로로 발행한다."},
+    {"name": "vehicle_id", "type": ["null", "string"], "default": null},
+    {"name": "boot_id", "type": ["null", "string"], "default": null},
+    {"name": "source_boot_id", "type": ["null", "string"], "default": null},
+    {"name": "seq", "type": ["null", "long"], "default": null},
+    {"name": "kind", "type": ["null", "string"], "default": null},
+    {"name": "stream_id", "type": ["null", "string"], "default": null},
+    {"name": "report_interval_ms", "type": ["null", "long"], "default": null}
   ]
 }

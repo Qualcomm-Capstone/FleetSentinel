@@ -11,9 +11,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Kafka 레코드를 Envelope 으로 감싼다. 페이로드는 아직 열지 않는다.
  *
- * 헤더가 없으면 게이트웨이가 쓴 레코드가 아니다. 그냥 통과시키면 신원 없는 레코드가
- * 파이프라인을 흐르므로 버리고 로그만 남긴다 — 이 단계에는 아직 DLQ 경로가 없다.
- * 곁가지 출력은 ProcessFunction 에서만 되기 때문이다.
+ * 잘못된 헤더도 원본과 Kafka 위치를 보존한다. 검증 실패 봉투는 dedup을 우회하고
+ * DecodeFunction에서 DLQ로 격리한다.
  */
 public class EnvelopeDeserializer implements KafkaRecordDeserializationSchema<Envelope> {
 
@@ -25,8 +24,9 @@ public class EnvelopeDeserializer implements KafkaRecordDeserializationSchema<En
         try {
             out.collect(Envelope.of(record));
         } catch (IllegalArgumentException e) {
-            log.warn("봉투를 만들 수 없다 — 게이트웨이가 쓴 레코드가 아니다: topic={} offset={} ({})",
+            log.warn("전송 헤더 검증 실패, DLQ로 격리: topic={} offset={} ({})",
                     record.topic(), record.offset(), e.getMessage());
+            out.collect(Envelope.invalid(record, e.getMessage()));
         }
     }
 

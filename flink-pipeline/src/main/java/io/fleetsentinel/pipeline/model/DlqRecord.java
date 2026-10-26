@@ -31,10 +31,18 @@ public final class DlqRecord implements Serializable {
     private final String pipelineStep;
     private final long processingTime;
     private final int attempt;
+    private final Envelope source;
 
     public DlqRecord(byte[] originalPayload, ErrorClass errorClass, String errorDetail,
                      String sourceSubscription, String pipelineStep,
                      long processingTime, int attempt) {
+        this(originalPayload, errorClass, errorDetail, sourceSubscription, pipelineStep,
+                processingTime, attempt, null);
+    }
+
+    private DlqRecord(byte[] originalPayload, ErrorClass errorClass, String errorDetail,
+                      String sourceSubscription, String pipelineStep, long processingTime,
+                      int attempt, Envelope source) {
         this.originalPayload = originalPayload;
         this.errorClass = errorClass;
         this.errorDetail = errorDetail;
@@ -42,12 +50,15 @@ public final class DlqRecord implements Serializable {
         this.pipelineStep = pipelineStep;
         this.processingTime = processingTime;
         this.attempt = attempt;
+        this.source = source;
     }
 
     public static DlqRecord of(Envelope env, ErrorClass cls, String step, String detail) {
         return new DlqRecord(env.payload(), cls, detail, env.topic(), step,
-                System.currentTimeMillis(), 1);
+                System.currentTimeMillis(), 1, env);
     }
+
+    public Envelope source() { return source; }
 
     public byte[] originalPayload() {
         return originalPayload;

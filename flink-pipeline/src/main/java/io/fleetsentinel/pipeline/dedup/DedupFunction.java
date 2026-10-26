@@ -10,10 +10,10 @@ import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.util.Collector;
 
 /**
- * 차량별 시퀀스 윈도우로 중복을 제거한다.
+ * 전송 identity별 시퀀스 윈도우로 중복을 제거한다.
  *
- * 앞에 keyBy(vehicle_id) 가 있어 같은 차량은 항상 같은 태스크로 오고, ValueState 가
- * 그 차량만의 비트맵을 들고 있다.
+ * 앞의 keyBy는 legacy의 vehicle_id, MQTT의 vehicle_id/boot_id/stream_id를 사용한다.
+ * 상태·이력의 독립 시퀀스가 서로를 중복으로 오인하지 않도록 ValueState를 분리한다.
  *
  * 게이트웨이가 아니라 여기인 이유는, 게이트웨이에 두면 인스턴스가 죽을 때 상태가 같이
  * 사라져 중복이 저장 계층까지 그대로 들어가기 때문이다. Flink 상태는 체크포인트로 살아난다.
@@ -59,6 +59,10 @@ public class DedupFunction extends KeyedProcessFunction<String, Envelope, Envelo
     @Override
     public void processElement(Envelope env, Context ctx, Collector<Envelope> out)
             throws Exception {
+        if (env.validationError() != null) {
+            out.collect(env);
+            return;
+        }
         // 이 차량의 비트맵을 꺼낸다. 처음 보는 차량이면 null 이라 새로 만든다.
         SeqWindow w = state.value();
         if (w == null) {
@@ -83,7 +87,10 @@ public class DedupFunction extends KeyedProcessFunction<String, Envelope, Envelo
             case TOO_OLD -> tooOld.inc();
         }
 
-        if (verdict.pass()) {
+        // MQTT retries can arrive outside the bitmap after bridge failover. Dropping
+        // an unseen late record would violate durable upload; ClickHouse's stable key
+        // handles duplicate inserts. Live alert operators separately reject stale time.
+        if (verdict.pass() || (env.mqtt() && verdict == Verdict.TOO_OLD)) {
             out.collect(env);
         }
     }

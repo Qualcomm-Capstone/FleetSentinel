@@ -8,7 +8,6 @@ import io.fleetsentinel.pipeline.model.Envelope;
 import io.fleetsentinel.pipeline.transform.DecodeFunction;
 import java.time.Duration;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.ExternalizedCheckpointRetention;
 import org.apache.flink.connector.base.DeliveryGuarantee;
@@ -68,7 +67,7 @@ public final class PipelineSupport {
                 .uid("kafka-source");
 
         DataStream<Envelope> deduped = raw
-                .keyBy(Envelope::vehicleId)
+                .keyBy(Envelope::dedupKey)
                 .process(new DedupFunction(window))
                 .name("dedup")
                 .uid("dedup");
@@ -82,13 +81,11 @@ public final class PipelineSupport {
     public static void addDlqSink(
             SingleOutputStreamOperator<Decoded> decoded, ParameterTool parameters) {
         decoded.getSideOutput(DLQ)
-                .map(d -> "%s|%s|%s|%s".formatted(
-                        d.errorClass(), d.pipelineStep(), d.sourceSubscription(), d.errorDetail()))
-                .sinkTo(KafkaSink.<String>builder()
+                .sinkTo(KafkaSink.<DlqRecord>builder()
                         .setBootstrapServers(parameters.get("bootstrap", "localhost:29092"))
                         .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                                 .setTopic(parameters.get("dlq-topic", "telemetry.dlq"))
-                                .setValueSerializationSchema(new SimpleStringSchema())
+                                .setValueSerializationSchema(new DlqSerializationSchema())
                                 .build())
                         .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
                         .build())
