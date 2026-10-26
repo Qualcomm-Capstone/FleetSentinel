@@ -104,13 +104,18 @@ FleetSentinel/
 
 ## 검증
 
-JDK 21과 17을 설치한 뒤 루트에서 `./gradlew clean build`를 실행하면 Java 세 모듈의
-단위·게이트웨이 통합 테스트와 JAR 빌드를 수행합니다. Gradle은 Wrapper에 고정되어 있습니다.
+JDK 21·17과 Docker를 준비한 뒤 루트에서 `./gradlew clean build`를 실행하면 Java 세 모듈의
+단위 테스트, 게이트웨이·ClickHouse 통합 테스트, JAR 빌드를 수행합니다. Gradle은 Wrapper에 고정되어 있습니다.
 API·게이트웨이는 Java 21, Flink는 Java 17을 사용하며 산출물은 각 모듈의 `build/libs/`에 생성됩니다.
 
-실제 ClickHouse 조회 테스트는 `infra/clickhouse/001-schema.sql`을 적용한 **빈 일회용 DB**에서
-`./gradlew :api:integrationTest -PclickhouseTestUrl=jdbc:ch://localhost:8123/fleet`로 별도 실행합니다.
-테스트는 샘플 데이터를 적재하므로 운영·개발용 공유 DB를 지정하지 않습니다.
+`./gradlew :api:integrationTest`는 Testcontainers로 일회용 ClickHouse를 준비하고 스키마를 적용한 뒤 검증합니다.
+외부 일회용 DB를 사용할 때만 `-PclickhouseTestUrl=jdbc:ch://localhost:8123/fleet`를 지정하고
+`infra/clickhouse/001-schema.sql`을 미리 적용합니다. 운영·개발용 공유 DB는 지정하지 않습니다.
+빠른 단위 검증은 `./gradlew :api:test :gateway:test :flink-pipeline:test`로 실행합니다.
+
+게이트웨이의 기본 스토리지 인증은 AWS 자격증명 체인(IAM 역할 포함)을 사용합니다.
+로컬 MinIO는 `--spring.profiles.active=local`로 선택하며 `make gateway`에 반영되어 있습니다.
+정적 키를 직접 설정할 때는 `fleetsentinel.object-store.credentials-mode=static`을 명시합니다.
 
 `make mqtt-test`로 수집 정책·보존·ACK·명령 단위 테스트를,
 `make mqtt-integration-test`로 실제 MQTT·Kafka·ClickHouse 연동을 검증합니다.
