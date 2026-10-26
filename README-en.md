@@ -102,6 +102,10 @@ FleetSentinel/
 
 ## Validation
 
+With JDK 21 and 17 installed, run `./gradlew clean build` at the repository root to test and
+package all three Java modules, including gateway integration tests. Gradle is pinned by the Wrapper.
+API/gateway use Java 21; Flink uses Java 17. JARs are generated under each module's `build/libs/`.
+
 Use `make mqtt-test` for collection policy, durability, ACK and command tests,
 `make mqtt-integration-test` for real MQTT/Kafka/ClickHouse integration,
 and `make flink-test` for Flink regressions.

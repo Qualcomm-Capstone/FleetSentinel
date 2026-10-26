@@ -1,0 +1,65 @@
+plugins {
+    id 'com.gradleup.shadow'
+}
+
+// The deployed Flink image is Java 17; keep both compilation and tests on that JVM.
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+def flinkVersion = '2.0.0'
+def providedFlink = ['flink-streaming-java', 'flink-clients',
+                     'flink-statebackend-rocksdb', 'flink-connector-base']
+
+dependencies {
+    // Supplied by the Flink cluster, but also needed by the local test harness.
+    providedFlink.each {
+        compileOnly "org.apache.flink:${it}:${flinkVersion}"
+        testImplementation "org.apache.flink:${it}:${flinkVersion}"
+    }
+    compileOnly 'org.slf4j:slf4j-api:2.0.13'
+
+    implementation 'org.apache.flink:flink-connector-kafka:4.0.1-2.0'
+    implementation 'org.apache.flink:flink-connector-jdbc-core:4.0.0-2.0'
+    implementation 'com.clickhouse:clickhouse-jdbc:0.9.0:all'
+    implementation 'org.apache.avro:avro:1.12.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.4'
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'org.assertj:assertj-core:3.26.3'
+    testImplementation "org.apache.flink:flink-test-utils:${flinkVersion}"
+    testImplementation "org.apache.flink:flink-streaming-java:${flinkVersion}:tests"
+    testImplementation "org.apache.flink:flink-runtime:${flinkVersion}:tests"
+    testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.13'
+}
+
+tasks.named('processResources') {
+    from(rootProject.file('schemas')) {
+        include '*.avsc'
+        into 'schemas'
+    }
+}
+
+tasks.named('shadowJar') {
+    archiveClassifier = ''
+    // Avro also requests SLF4J transitively; the cluster supplies it at runtime.
+    dependencies {
+        exclude(dependency('org.slf4j:slf4j-api:.*'))
+    }
+    // JDBC and connector service descriptors must survive fat-JAR packaging.
+    mergeServiceFiles()
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'module-info.class'
+    manifest {
+        attributes 'Main-Class': 'io.fleetsentinel.pipeline.TelemetryPipeline'
+    }
+}
+
+tasks.named('jar') {
+    enabled = false
+}
+
+tasks.named('assemble') {
+    dependsOn tasks.named('shadowJar')
+}

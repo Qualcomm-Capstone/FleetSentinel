@@ -172,9 +172,8 @@ services:
         metrics.reporter.prom.port: 9249
     volumes:
       - flink-checkpoints:/tmp/flink-checkpoints
-      # G007: fat jar bind-mounted read-only so `docker compose exec jobmanager flink run` can
-      # submit it to the real cluster (빌드·제출 절차는 v3.0 파이프라인 재작성 시 확정).
-      - ../flink-pipeline/target/fleetsentinel-flink-pipeline.jar:/jars/fleetsentinel.jar:ro
+      # Gradle shadowJar 산출물을 읽기 전용으로 마운트한다.
+      - ../flink-pipeline/build/libs/flink-pipeline-0.1.0.jar:/jars/fleetsentinel.jar:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview >/dev/null 2>&1 || exit 1"]
       interval: 10s

@@ -67,19 +67,19 @@ ha-demo: ## Kafka HA broker-kill 데모 (ADR-009, 별도 토픽 사용)
 # 제조 프로비저닝·로테이션·폐기는 스코프 밖 — SDD L-7.
 PKI ?= ./pki
 JAVA21 ?= $(shell /usr/libexec/java_home -v 21 2>/dev/null)
+GRADLE := ./gradlew --console=plain
 
 certs: ## 개발용 사설 CA + 차량 인증서 발급 (pki/)
 	PKI_DIR=$(PKI) bash scripts/gen-certs.sh vehicle-0001 vehicle-0002
 
 gateway-test: ## 게이트웨이 테스트 — 단위 + 통합 (임베디드 Kafka로 mTLS·사칭 차단까지)
-	@# verify여야 한다. *IT는 surefire가 아니라 failsafe가 돌린다.
-	cd gateway && JAVA_HOME=$(JAVA21) mvn -B verify
+	$(GRADLE) :gateway:check
 
 gateway: ## 게이트웨이 기동 (gRPC 9090 mTLS · 관리 HTTP 8082)
-	cd gateway && JAVA_HOME=$(JAVA21) mvn -B -q package -DskipTests
+	$(GRADLE) :gateway:bootJar
 	FLEETSENTINEL_PKI=$(PKI) \
 	KAFKA_BOOTSTRAP=localhost:29092,localhost:29093,localhost:29094 \
-	$(JAVA21)/bin/java -jar gateway/target/gateway-0.1.0.jar
+	$(JAVA21)/bin/java -jar gateway/build/libs/gateway-0.1.0.jar
 
 ship: ## nuScenes 신호·객체 메타데이터 → WAL → 게이트웨이 → Kafka 종단 재생
 	cd exploration && PYTHONPATH=. .venv/bin/python scripts/ship_to_gateway.py \
@@ -94,7 +94,7 @@ ship-segments: ## MCAP 클립 → MinIO(presigned) → segment-ref → Kafka
 	  --pki ../$(PKI) --vehicle vehicle-0001 --mcap-dir ../data/mcap $(ARGS)
 
 # ── Flink 파이프라인 ───────────────────────────────────────────────────────
-FLINK_JAR := flink-pipeline/target/flink-pipeline-0.1.0.jar
+FLINK_JAR := flink-pipeline/build/libs/flink-pipeline-0.1.0.jar
 # nuScenes fixture의 지도 범위를 감싼 개발용 사각 경계다. 실제 ODD 정책이 아니다.
 ODD_BOUNDS ?= singapore-onenorth=1.2980,1.2990,103.7882,103.7887;boston-seaport=42.3445,42.3518,-71.0507,-71.0341
 
@@ -104,10 +104,10 @@ ch-schema: ## ClickHouse 스키마 + FINAL 뷰 적용
 	@echo "적용 완료 — 애플리케이션은 _raw 가 아니라 뷰를 본다(L-14)"
 
 flink-test: ## Flink 잡 테스트 (Python 이식 대조 포함)
-	cd flink-pipeline && JAVA_HOME=$(JAVA21) mvn -B test
+	$(GRADLE) :flink-pipeline:test
 
 flink-build: ## 잡 JAR 빌드
-	cd flink-pipeline && JAVA_HOME=$(JAVA21) mvn -B -q package -DskipTests
+	$(GRADLE) :flink-pipeline:shadowJar
 	@ls -la $(FLINK_JAR)
 
 flink-submit: flink-build ## 알림·ClickHouse 적재를 독립 Flink 잡으로 제출
@@ -129,13 +129,13 @@ flink-submit: flink-build ## 알림·ClickHouse 적재를 독립 Flink 잡으로
 
 # ── 관제 API ───────────────────────────────────────────────────────────────
 api-build: ## API JAR 빌드
-	cd api && JAVA_HOME=$(JAVA21) mvn -B -q package -DskipTests
-	@ls -la api/target/api-0.1.0.jar
+	$(GRADLE) :api:bootJar
+	@ls -la api/build/libs/api-0.1.0.jar
 
 api: api-build ## API 기동 (:8080) — ClickHouse 질의 + telemetry/alert SSE
 	CLICKHOUSE_URL="jdbc:ch://localhost:8124/fleet" \
 	KAFKA_BOOTSTRAP_SERVERS="localhost:29092,localhost:29093,localhost:29094" \
-	$(JAVA21)/bin/java -jar api/target/api-0.1.0.jar
+	$(JAVA21)/bin/java -jar api/build/libs/api-0.1.0.jar
 
 dashboard: ## 대시보드를 **실 API** 로 띄운다 (VITE_API 없으면 목업)
 	cd frontend && VITE_API=http://localhost:8080 npm run dev

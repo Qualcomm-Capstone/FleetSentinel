@@ -1,0 +1,38 @@
+plugins {
+    id 'base'
+    id 'org.springframework.boot' version '4.0.8' apply false
+    id 'io.spring.dependency-management' version '1.1.7' apply false
+    id 'com.google.protobuf' version '0.9.5' apply false
+    id 'com.gradleup.shadow' version '8.3.9' apply false
+}
+
+subprojects {
+    apply plugin: 'java'
+
+    group = 'io.fleetsentinel'
+    version = '0.1.0'
+
+    repositories {
+        mavenCentral()
+    }
+
+    java {
+        toolchain.languageVersion = JavaLanguageVersion.of(21)
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs.add('-parameters')
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+        testLogging.events = ['failed', 'skipped']
+    }
+}
+
+tasks.named('wrapper') {
+    gradleVersion = '8.14.4'
+    distributionType = Wrapper.DistributionType.BIN
+    distributionSha256Sum = 'f1771298a70f6db5a29daf62378c4e18a17fc33c9ba6b14362e0cdf40610380d'
+}

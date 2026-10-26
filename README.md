@@ -104,6 +104,10 @@ FleetSentinel/
 
 ## 검증
 
+JDK 21과 17을 설치한 뒤 루트에서 `./gradlew clean build`를 실행하면 Java 세 모듈의
+단위·게이트웨이 통합 테스트와 JAR 빌드를 수행합니다. Gradle은 Wrapper에 고정되어 있습니다.
+API·게이트웨이는 Java 21, Flink는 Java 17을 사용하며 산출물은 각 모듈의 `build/libs/`에 생성됩니다.
+
 `make mqtt-test`로 수집 정책·보존·ACK·명령 단위 테스트를,
 `make mqtt-integration-test`로 실제 MQTT·Kafka·ClickHouse 연동을 검증합니다.
 Flink 회귀 테스트는 `make flink-test`를 사용합니다.

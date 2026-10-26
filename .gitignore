@@ -69,8 +69,10 @@ exploration/wal-run/
 *.sqlite-wal
 *.sqlite-shm
 
-# Maven 빌드 산출물
+# Java build outputs (including previous Maven builds)
 target/
+.gradle/
+build/
 
 # proto에서 생성된 Python 스텁은 커밋한다 — grpcio-tools 없이도 재생기를 읽을 수 있어야
 # 하고, 생성 후 상대 임포트로 고치는 수동 단계가 있어 재생성이 자동이 아니다.

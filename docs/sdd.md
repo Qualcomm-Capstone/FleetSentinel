@@ -105,7 +105,7 @@ gRPC에서도 같은 선택 정책·배칭·양방향 명령을 구현할 수 �
 | 계층 | 채택 | 버전 | 근거 |
 |---|---|---|---|
 | 스트림 버스 | **Apache Kafka** (KRaft) | 4.x | 3-broker RF=3 / ISR=2로 broker-level HA 실증 |
-| 스트림 처리 | **Apache Flink** | **2.0.0** | Docker 이미지와 Maven 의존성을 같은 버전으로 고정. **PyFlink는 기각**(§4.1 A-13) — 커넥터·API 조합 때문이며 성능 문제는 아니다 |
+| 스트림 처리 | **Apache Flink** | **2.0.0** | Docker 이미지와 Gradle 의존성을 같은 버전으로 고정. **PyFlink는 기각**(§4.1 A-13) — 커넥터·API 조합 때문이며 성능 문제는 아니다 |
 | 원시 로그 저장 | 오브젝트 스토리지 + **MCAP** | — | S3 호환 API로 접근한다. 로컬은 MinIO, 배포 시 GCS의 S3 호환(XML) 엔드포인트를 사용한다. `s3://`는 접근 프로토콜을 나타낸다. MCAP은 ROS 2 기본 bag 포맷 |
 | 구조화 저장·질의 | **ClickHouse** | **26.3 LTS** (`:lts` 태그) | §4.1 A-8 |
 | API | **Spring Boot** | **4.0.x** (2025-11 릴리스) | Spring Framework 7.x · Jakarta EE 11 · Servlet 6.1 |
@@ -783,7 +783,9 @@ DLQ는 격리된 실패 데이터이지 그 자체로 유실 확정이 아니다
 
 재현: `make mqtt-test`, `make mqtt-integration-test`, `make gateway-test`, `make flink-test`.
 Python 전체는 exploration에서 `RUN_MQTT_INTEGRATION=1 PYTHONPATH=. .venv/bin/python -m pytest -q`로 실행한다.
-API는 Java 21의 `mvn test`, 프론트엔드는 `npm test`와 `npm run typecheck`를 사용한다.
+Java 전체 빌드·검증은 루트에서 `./gradlew clean build`로 실행한다. 게이트웨이의 `*IT` 통합 테스트도 포함한다.
+API·게이트웨이는 JDK 21, Flink는 배포 이미지와 같은 JDK 17을 Gradle toolchain으로 사용한다.
+프론트엔드는 `npm test`와 `npm run typecheck`를 사용한다.
 데이터셋·좌표 검증은 [데이터 설계](data-design.md)를 참고한다. 과거 gRPC WAL 벤치마크 문서는 Git 이력에 남아 있다.
 
 ### 6.4 육안 확인을 최소화한다

@@ -1,0 +1,3 @@
+rootProject.name = 'FleetSentinel'
+
+include 'api', 'gateway', 'flink-pipeline'
