@@ -9,8 +9,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -18,9 +17,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /** Kafka 알림을 연결된 SSE 구독자에게 전달하고 짧은 재연결 구간을 보관한다. */
 @Component
+@Slf4j
 public class AlertHub {
 
-    private static final Logger log = LoggerFactory.getLogger(AlertHub.class);
     private static final long TIMEOUT_MS = Duration.ofHours(2).toMillis();
 
     private final int replayCapacity;

@@ -1,9 +1,13 @@
 package io.fleetsentinel.gateway.config;
 
 import java.time.Duration;
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /** 게이트웨이 고유 설정. gRPC 서버·TLS는 {@code spring.grpc.*}가 담당한다. */
+@Getter
+@Setter
 @ConfigurationProperties(prefix = "fleetsentinel.gateway")
 public class GatewayProperties {
 
@@ -19,22 +23,8 @@ public class GatewayProperties {
      */
     private int maxInflight = 4096;
 
-    public Topics getTopics() {
-        return topics;
-    }
-
-    public Ack getAck() {
-        return ack;
-    }
-
-    public int getMaxInflight() {
-        return maxInflight;
-    }
-
-    public void setMaxInflight(int maxInflight) {
-        this.maxInflight = maxInflight;
-    }
-
+    @Getter
+    @Setter
     public static class Topics {
         /**
          * 계층 셋이 한 토픽으로 간다. 나누면 `seq` 단일 수열이 조각나
@@ -42,45 +32,15 @@ public class GatewayProperties {
          */
         private String records = "telemetry.records";
         private String dlq = "telemetry.dlq";
-
-        public String getRecords() {
-            return records;
-        }
-
-        public void setRecords(String records) {
-            this.records = records;
-        }
-
-        public String getDlq() {
-            return dlq;
-        }
-
-        public void setDlq(String dlq) {
-            this.dlq = dlq;
-        }
     }
 
+    @Getter
+    @Setter
     public static class Ack {
         /** 이만큼 전진하면 CACK을 방출한다. */
         private int everyN = 128;
 
         /** 전진량이 적어도 이 시간이 지나면 방출한다. 저부하에서 커밋이 멈추지 않게 한다. */
         private Duration every = Duration.ofMillis(200);
-
-        public int getEveryN() {
-            return everyN;
-        }
-
-        public void setEveryN(int everyN) {
-            this.everyN = everyN;
-        }
-
-        public Duration getEvery() {
-            return every;
-        }
-
-        public void setEvery(Duration every) {
-            this.every = every;
-        }
     }
 }

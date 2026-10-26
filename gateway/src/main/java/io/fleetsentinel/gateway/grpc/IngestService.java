@@ -19,8 +19,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.grpc.server.service.GrpcService;
 
 /**
@@ -32,9 +31,8 @@ import org.springframework.grpc.server.service.GrpcService;
  * 인스턴스에 붙어도 동작이 같고 확장이 인스턴스 추가로 끝난다.
  */
 @GrpcService
+@Slf4j
 public class IngestService extends IngestGrpc.IngestImplBase {
-
-    private static final Logger log = LoggerFactory.getLogger(IngestService.class);
 
     private final RecordPublisher publisher;
     private final GatewayProperties props;

@@ -1,7 +1,11 @@
 package io.fleetsentinel.api.config;
 
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+@Getter
+@Setter
 @ConfigurationProperties(prefix = "fleetsentinel.api")
 public class ApiProperties {
 
@@ -17,20 +21,4 @@ public class ApiProperties {
      * 서버가 아니라 클라이언트가 병목이다.
      */
     private int maxRecordsPerPush = 200;
-
-    public long getPushIntervalMs() {
-        return pushIntervalMs;
-    }
-
-    public void setPushIntervalMs(long pushIntervalMs) {
-        this.pushIntervalMs = pushIntervalMs;
-    }
-
-    public int getMaxRecordsPerPush() {
-        return maxRecordsPerPush;
-    }
-
-    public void setMaxRecordsPerPush(int maxRecordsPerPush) {
-        this.maxRecordsPerPush = maxRecordsPerPush;
-    }
 }

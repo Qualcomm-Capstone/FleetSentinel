@@ -1,6 +1,7 @@
 package io.fleetsentinel.api.web;
 
 import io.fleetsentinel.api.alert.AlertHub;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -11,13 +12,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api")
+@RequiredArgsConstructor
 public class AlertStreamController {
 
     private final AlertHub hub;
-
-    public AlertStreamController(AlertHub hub) {
-        this.hub = hub;
-    }
 
     @GetMapping(value = "/alerts", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter alerts(

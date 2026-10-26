@@ -14,8 +14,7 @@ import java.security.cert.X509Certificate;
 import java.util.Optional;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.grpc.server.GlobalServerInterceptor;
 import org.springframework.stereotype.Component;
 
@@ -38,9 +37,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @GlobalServerInterceptor
+@Slf4j
 public class PeerIdentityInterceptor implements ServerInterceptor {
-
-    private static final Logger log = LoggerFactory.getLogger(PeerIdentityInterceptor.class);
 
     /** 차량이 주장하는 ID. 인증서와 대조된다. */
     public static final Metadata.Key<String> VEHICLE_ID_CLAIM =

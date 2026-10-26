@@ -1,8 +1,8 @@
 package io.fleetsentinel.api.alert;
 
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
@@ -10,17 +10,12 @@ import tools.jackson.databind.ObjectMapper;
 
 /** 알림 토픽을 읽어 API 인스턴스에 연결된 SSE 구독자에게 broadcast한다. */
 @Component
+@Slf4j
+@RequiredArgsConstructor
 public class KafkaAlertConsumer {
-
-    private static final Logger log = LoggerFactory.getLogger(KafkaAlertConsumer.class);
 
     private final ObjectMapper json;
     private final AlertHub hub;
-
-    public KafkaAlertConsumer(ObjectMapper json, AlertHub hub) {
-        this.json = json;
-        this.hub = hub;
-    }
 
     @KafkaListener(
             topics = "${fleetsentinel.alerts.topic:fleet.alerts}",

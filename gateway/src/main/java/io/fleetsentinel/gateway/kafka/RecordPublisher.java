@@ -1,6 +1,7 @@
 package io.fleetsentinel.gateway.kafka;
 
 import io.fleetsentinel.gateway.config.GatewayProperties;
+import lombok.RequiredArgsConstructor;
 import io.fleetsentinel.gateway.proto.RecordKind;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
@@ -27,15 +28,11 @@ import org.springframework.stereotype.Component;
  * 게이트웨이를 재배포해야 한다. 검증은 Flink가 한다.
  */
 @Component
+@RequiredArgsConstructor
 public class RecordPublisher {
 
     private final KafkaTemplate<byte[], byte[]> kafka;
     private final GatewayProperties props;
-
-    public RecordPublisher(KafkaTemplate<byte[], byte[]> kafka, GatewayProperties props) {
-        this.kafka = kafka;
-        this.props = props;
-    }
 
     /**
      * @return 쓰기 완료 future. <b>완료됐을 때만</b> 해당 seq를 ack해도 된다 —

@@ -1,6 +1,8 @@
 package io.fleetsentinel.gateway.config;
 
 import java.time.Duration;
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
@@ -9,6 +11,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * <p>로컬은 MinIO, 운영은 S3/GCS를 가정한다. MinIO는 S3 호환이라 엔드포인트와
  * path-style만 다르다.
  */
+@Getter
+@Setter
 @ConfigurationProperties(prefix = "fleetsentinel.object-store")
 public class ObjectStoreProperties {
 
@@ -47,84 +51,4 @@ public class ObjectStoreProperties {
 
     /** S3 규약상 마지막 파트를 뺀 모든 파트는 5 MiB 이상이어야 한다. */
     private long minPartSizeBytes = 5L * 1024 * 1024;
-
-    public String getBucket() {
-        return bucket;
-    }
-
-    public void setBucket(String bucket) {
-        this.bucket = bucket;
-    }
-
-    public String getKeyPrefix() {
-        return keyPrefix;
-    }
-
-    public void setKeyPrefix(String keyPrefix) {
-        this.keyPrefix = keyPrefix;
-    }
-
-    public String getEndpoint() {
-        return endpoint;
-    }
-
-    public void setEndpoint(String endpoint) {
-        this.endpoint = endpoint;
-    }
-
-    public boolean isPathStyleAccess() {
-        return pathStyleAccess;
-    }
-
-    public void setPathStyleAccess(boolean pathStyleAccess) {
-        this.pathStyleAccess = pathStyleAccess;
-    }
-
-    public String getRegion() {
-        return region;
-    }
-
-    public void setRegion(String region) {
-        this.region = region;
-    }
-
-    public String getAccessKey() {
-        return accessKey;
-    }
-
-    public void setAccessKey(String accessKey) {
-        this.accessKey = accessKey;
-    }
-
-    public String getSecretKey() {
-        return secretKey;
-    }
-
-    public void setSecretKey(String secretKey) {
-        this.secretKey = secretKey;
-    }
-
-    public Duration getPresignTtl() {
-        return presignTtl;
-    }
-
-    public void setPresignTtl(Duration presignTtl) {
-        this.presignTtl = presignTtl;
-    }
-
-    public int getMaxParts() {
-        return maxParts;
-    }
-
-    public void setMaxParts(int maxParts) {
-        this.maxParts = maxParts;
-    }
-
-    public long getMinPartSizeBytes() {
-        return minPartSizeBytes;
-    }
-
-    public void setMinPartSizeBytes(long minPartSizeBytes) {
-        this.minPartSizeBytes = minPartSizeBytes;
-    }
 }
