@@ -1,0 +1,13 @@
+# Vehicle CN is the authoritative topic identity. No cross-vehicle access.
+pattern write fleet/v1/%u/up/+
+pattern write fleet/v1/%u/reported
+pattern read fleet/v1/%u/ack/+
+pattern read fleet/v1/%u/command
+
+user bridge
+topic read fleet/v1/+/up/+
+topic write fleet/v1/+/ack/+
+
+user command-service
+topic write fleet/v1/+/command
+topic read fleet/v1/+/reported

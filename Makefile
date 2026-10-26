@@ -1,9 +1,9 @@
 # FleetSentinel — 로컬 인프라 오케스트레이션
-# 사용: make up → make topics → make smoke   (절차는 RUN.md)
+# 인프라 검증: make up → make topics → make smoke
 #
 # 신호·객체 메타데이터 경로는 차량(WAL) → gRPC 게이트웨이 → Kafka 까지 이어져 있다:
 #   make up → make topics → make certs → make gateway → make ship
-# Flink→ClickHouse와 실시간 알림 경로까지 구현돼 있다. 실행 순서는 RUN.md를 따른다.
+# MQTT 회귀 검증: make mqtt-test → make mqtt-integration-test
 # 설계 = docs/sdd.md
 COMPOSE := docker compose -f infra/docker-compose.yml
 export COMPOSE
@@ -15,6 +15,13 @@ ALERT_GROUP ?= fleetsentinel-alerts
 STORAGE_GROUP ?= fleetsentinel-storage
 
 .DEFAULT_GOAL := help
+.PHONY: mqtt-test mqtt-integration-test
+mqtt-test: ## MQTT 수집 정책·보존·명령·저장 확인 단위 테스트
+	cd exploration && PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_mqtt_collection.py tests/test_mqtt_edge_runtime.py
+
+mqtt-integration-test: ## 격리된 MQTT/Kafka 컨테이너로 mTLS·ACL·재전송·저장 확인 검증
+	cd exploration && RUN_MQTT_INTEGRATION=1 PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_mqtt_integration.py
+
 .PHONY: help up down restart ps logs topics smoke clean pull config ha-demo \
         certs gateway gateway-test ship ship-impersonate verify-kafka \
         mcap ship-segments ch-schema flink-build flink-submit flink-test k8s-render \

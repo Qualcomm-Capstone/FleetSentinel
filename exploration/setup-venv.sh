@@ -25,7 +25,8 @@ echo "[1/2] devkit + 도구 설치 (numpy<2가 함께 깔린다)"
   grpcio==1.83.0 \
   grpcio-tools==1.83.0 \
   fastavro==1.12.2 \
-  confluent-kafka==2.15.0
+  confluent-kafka==2.15.0 \
+  paho-mqtt==2.1.0
 
 echo "[2/2] numpy를 2.x로 덮어쓰기 (devkit 선언은 의도적으로 무시)"
 ./.venv/bin/pip install -q -U 'numpy>=2.1'

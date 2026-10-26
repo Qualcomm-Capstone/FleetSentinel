@@ -63,6 +63,11 @@ frontend/public/rrd/
 # 개발용 사설 PKI — 개인키가 평문이다. 커밋하지 않는다(SDD L-7).
 pki/
 exploration/wal-run/
+# MQTT edge/operator stores and isolated development broker state (never commit keys/data).
+/mqtt-local/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # Maven 빌드 산출물
 target/

@@ -22,3 +22,4 @@ grpcio==1.83.0
 grpcio-tools==1.83.0   # ingest.proto → Python 스텁 재생성용
 fastavro==1.12.2       # schemas/*.avsc 로 레코드 본문 인코딩
 confluent-kafka==2.15.0  # verify_kafka.py — 적재분을 직접 꺼내 계약과 대조
+paho-mqtt==2.1.0        # opt-in MQTT 5 telemetry and command path
