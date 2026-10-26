@@ -1,5 +1,7 @@
 package io.fleetsentinel.pipeline;
 
+import io.fleetsentinel.pipeline.source.TelemetryRecordMapper;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.fleetsentinel.pipeline.alert.AlertEvent;
@@ -44,7 +46,7 @@ class MqttContractTest {
             r.put("values_num", Map.of("speed_mps", speed, "mission_active", 1.0,
                     "planned_stop", 0.0, "sensor_healthy", 1.0));
             r.put("values_vec", Map.of()); r.put("values_str", Map.of("mission_id", "m1"));
-            return Decoded.signal(env, r, null, null);
+            return TelemetryRecordMapper.signal(env, r, null, null);
         }
     }
 

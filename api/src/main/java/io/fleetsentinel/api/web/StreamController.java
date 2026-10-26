@@ -1,15 +1,17 @@
 package io.fleetsentinel.api.web;
 
 import io.fleetsentinel.api.config.ApiProperties;
+import io.fleetsentinel.api.model.PerceptionFrame;
+import io.fleetsentinel.api.model.SignalSample;
+import io.fleetsentinel.api.model.TimeRange;
+import io.fleetsentinel.api.model.VehicleObservation;
 import io.fleetsentinel.api.query.TelemetryQueries;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -39,9 +41,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 @RestController
 @RequestMapping("/api")
 @EnableConfigurationProperties(ApiProperties.class)
+@Slf4j
 public class StreamController {
-
-    private static final Logger log = LoggerFactory.getLogger(StreamController.class);
 
     /** 연결 유지 상한. 브라우저가 끊기면 EventSource 가 알아서 재연결한다. */
     private static final long TIMEOUT_MS = Duration.ofHours(2).toMillis();
@@ -100,8 +101,8 @@ public class StreamController {
         }
         cursor = wrapped ? lo : to;
 
-        List<Map<String, Object>> signals;
-        List<Map<String, Object>> perception;
+        List<SignalSample> signals;
+        List<PerceptionFrame> perception;
         try {
             signals = queries.signalsBetween(from, to, props.getMaxRecordsPerPush());
             perception = queries.perceptionBetween(from, to, 50);
@@ -136,7 +137,7 @@ public class StreamController {
                 if (wrapped) {
                     sub.emitter.send(SseEmitter.event()
                             .name("epoch")
-                            .data(Map.of("at", System.currentTimeMillis())));
+                            .data(new Epoch(System.currentTimeMillis())));
                 }
             } catch (IOException | IllegalStateException e) {
                 // 브라우저가 끊었다. EventSource 가 알아서 재연결하므로 조용히 정리한다.
@@ -152,23 +153,19 @@ public class StreamController {
      * <p>레코드마다 SSE 프레임을 만들면 초당 1,308개가 되고 브라우저가 먼저 무너진다.
      * <b>전송 단위만 배치이고 계약은 레코드 단위</b>다 — 목업 스트림과 같은 형태를 준다.
      */
-    private void sendBatch(Subscriber sub, List<Map<String, Object>> rows) throws IOException {
-        List<Map<String, Object>> mine = sub.filter(rows);
+    private void sendBatch(Subscriber sub, List<SignalSample> rows) throws IOException {
+        List<SignalSample> mine = sub.filter(rows);
         if (mine.isEmpty()) {
             return;
         }
         sub.emitter.send(SseEmitter.event()
                 .name("signal")
-                .data(Map.of(
-                        "vehicle_id", mine.get(0).get("vehicle_id"),
-                        "t", mine.get(0).get("t"),
-                        "n", mine.size(),
-                        "records", mine)));
+                .data(SignalSample.Batch.of(mine)));
     }
 
-    private void sendPerception(Subscriber sub, List<Map<String, Object>> rows)
+    private void sendPerception(Subscriber sub, List<PerceptionFrame> rows)
             throws IOException {
-        for (Map<String, Object> row : sub.filter(rows)) {
+        for (PerceptionFrame row : sub.filter(rows)) {
             sub.emitter.send(SseEmitter.event().name("perception").data(row));
         }
     }
@@ -178,7 +175,7 @@ public class StreamController {
         for (Subscriber sub : subscribers) {
             try {
                 sub.emitter.send(SseEmitter.event()
-                        .name("epoch").data(Map.of("at", System.currentTimeMillis())));
+                        .name("epoch").data(new Epoch(System.currentTimeMillis())));
             } catch (IOException | IllegalStateException e) {
                 subscribers.remove(sub);
                 sub.emitter.completeWithError(e);
@@ -191,12 +188,12 @@ public class StreamController {
         if (cursor != null) {
             return true;
         }
-        Instant[] range = queries.timeRange();
+        TimeRange range = queries.timeRange();
         if (range == null) {
             return false;
         }
-        lo = range[0];
-        hi = range[1];
+        lo = range.start();
+        hi = range.end();
         cursor = lo;
         log.info("재생 범위: {} ~ {} ({}초)", lo, hi, Duration.between(lo, hi).toSeconds());
         return true;
@@ -205,13 +202,15 @@ public class StreamController {
     /** 구독자 하나. {@code vehicle} 을 주면 그 차량만 받는다. */
     private record Subscriber(SseEmitter emitter, String vehicle) {
 
-        List<Map<String, Object>> filter(List<Map<String, Object>> rows) {
+        <T extends VehicleObservation> List<T> filter(List<T> rows) {
             if (vehicle == null || vehicle.isBlank()) {
                 return rows;
             }
             return rows.stream()
-                    .filter(r -> vehicle.equals(r.get("vehicle_id")))
+                    .filter(r -> vehicle.equals(r.vehicleId()))
                     .toList();
         }
     }
+
+    private record Epoch(long at) {}
 }

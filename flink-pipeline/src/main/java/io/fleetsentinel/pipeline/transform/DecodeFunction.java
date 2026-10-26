@@ -1,5 +1,7 @@
 package io.fleetsentinel.pipeline.transform;
 
+import io.fleetsentinel.pipeline.source.TelemetryRecordMapper;
+
 import io.fleetsentinel.pipeline.PipelineSupport;
 import io.fleetsentinel.pipeline.geo.Enu;
 import io.fleetsentinel.pipeline.model.Decoded;
@@ -107,7 +109,7 @@ public class DecodeFunction extends ProcessFunction<Envelope, Decoded> {
             lat = ll[0];
             lon = ll[1];
         }
-        out.collect(Decoded.signal(env, r, lat, lon));
+        out.collect(TelemetryRecordMapper.signal(env, r, lat, lon));
     }
 
     /**
@@ -157,7 +159,7 @@ public class DecodeFunction extends ProcessFunction<Envelope, Decoded> {
         }
         // 박스 좌표는 글로벌 프레임이지만 지역(location)이 레코드에 없다.
         // 신호 스트림과 조인해야 파생할 수 있어 여기서는 null 로 둔다 — 미해결.
-        out.collect(Decoded.perception(env, r, null, null));
+        out.collect(TelemetryRecordMapper.perception(env, r, null, null));
     }
 
     private void handleSegment(Envelope env, Context ctx, Collector<Decoded> out) {
@@ -171,7 +173,7 @@ public class DecodeFunction extends ProcessFunction<Envelope, Decoded> {
             dlq(ctx, env, ErrorClass.BUSINESS_RULE_FAILURE, "validate-segment", bad.get());
             return;
         }
-        out.collect(Decoded.segment(env, r));
+        out.collect(TelemetryRecordMapper.segment(env, r));
     }
 
     /** 디코드에 성공하면 레코드를, 실패하면 DLQ로 보낸 뒤 null 을 준다. */

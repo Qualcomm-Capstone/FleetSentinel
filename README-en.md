@@ -106,6 +106,10 @@ With JDK 21 and 17 installed, run `./gradlew clean build` at the repository root
 package all three Java modules, including gateway integration tests. Gradle is pinned by the Wrapper.
 API/gateway use Java 21; Flink uses Java 17. JARs are generated under each module's `build/libs/`.
 
+Run ClickHouse query tests separately against an **empty, disposable database** initialized with
+`infra/clickhouse/001-schema.sql`: `./gradlew :api:integrationTest -PclickhouseTestUrl=jdbc:ch://localhost:8123/fleet`.
+These tests insert fixtures; do not point them at a shared development or production database.
+
 Use `make mqtt-test` for collection policy, durability, ACK and command tests,
 `make mqtt-integration-test` for real MQTT/Kafka/ClickHouse integration,
 and `make flink-test` for Flink regressions.

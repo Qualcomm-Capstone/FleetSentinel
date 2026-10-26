@@ -25,3 +25,23 @@ dependencies {
 tasks.named('jar') {
     enabled = false
 }
+
+tasks.named('test') {
+    exclude '**/*IT.class'
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Tests ClickHouse queries against an empty, disposable database.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    include '**/*IT.class'
+    outputs.upToDateWhen { false }
+    def databaseUrl = providers.gradleProperty('clickhouseTestUrl').orElse('')
+    systemProperty 'clickhouse.test.url', databaseUrl.get()
+    doFirst {
+        if (databaseUrl.get().isBlank()) {
+            throw new GradleException('Provide -PclickhouseTestUrl for a disposable ClickHouse with infra/clickhouse/001-schema.sql applied.')
+        }
+    }
+}

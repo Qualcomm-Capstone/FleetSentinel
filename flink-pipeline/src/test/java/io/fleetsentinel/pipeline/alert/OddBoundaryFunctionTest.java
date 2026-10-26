@@ -1,5 +1,7 @@
 package io.fleetsentinel.pipeline.alert;
 
+import io.fleetsentinel.pipeline.source.TelemetryRecordMapper;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.fleetsentinel.pipeline.alert.AlertEvent.Type;
@@ -90,7 +92,7 @@ class OddBoundaryFunctionTest {
         record.put("values_vec", Map.of());
         record.put("values_str", Map.of("location", "test-map"));
         var envelope = new Envelope("vehicle-1", "boot-1", seq, "signal", new byte[0], "test");
-        return Decoded.signal(envelope, record, latitude, longitude);
+        return TelemetryRecordMapper.signal(envelope, record, latitude, longitude);
     }
 
     private static Schema loadSchema() {

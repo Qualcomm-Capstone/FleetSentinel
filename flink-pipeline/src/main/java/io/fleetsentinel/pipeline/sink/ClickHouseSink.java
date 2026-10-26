@@ -2,20 +2,16 @@ package io.fleetsentinel.pipeline.sink;
 
 import io.fleetsentinel.pipeline.model.Decoded;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.functions.sink.legacy.RichSinkFunction;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * ClickHouse 배치 INSERT 싱크.
@@ -33,10 +29,10 @@ import org.slf4j.LoggerFactory;
  * 배치로 넣는 이유는 ClickHouse 가 작은 INSERT 를 싫어해서다 — 파트가 폭증해 머지가
  * 못 따라간다. 배치가 차거나 체크포인트가 올 때만 flush 한다.
  */
+@Slf4j
 public class ClickHouseSink extends RichSinkFunction<Decoded> implements CheckpointedFunction {
 
     private static final long serialVersionUID = 1L;
-    private static final Logger log = LoggerFactory.getLogger(ClickHouseSink.class);
 
     private final String url;
     private final String user;
@@ -114,51 +110,13 @@ public class ClickHouseSink extends RichSinkFunction<Decoded> implements Checkpo
     }
 
     private void insert(Decoded.Kind kind, List<Decoded> rows) throws SQLException {
-        String sql = switch (kind) {
-            case SIGNAL -> """
-                    INSERT INTO fleet.signals_raw
-                      (vehicle_id, boot_id, seq, scene_id, channel, sensor_time, log_time,
-                       values_num, values_vec, values_str, lat, lon)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""";
-            case PERCEPTION -> """
-                    INSERT INTO fleet.perception_raw
-                      (vehicle_id, boot_id, seq, scene_id, sample_id, sensor_time,
-                       track_id, category, attribute,
-                       center_x, center_y, center_z, size_w, size_l, size_h,
-                       rot_w, rot_x, rot_y, rot_z,
-                       visibility, num_lidar_pts, num_radar_pts, lat, lon)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""";
-            case SEGMENT -> """
-                    INSERT INTO fleet.segments_raw
-                      (vehicle_id, boot_id, seq, segment_id, scene_id, blob_uri,
-                       t_start, t_end, sensor_channels, size_bytes, checksum,
-                       sample_count, state, drop_reason, calibration)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""";
-        };
-
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            for (Decoded d : rows) {
-                // JDBC 물음표 번호는 1부터다. 신원 3개를 먼저 넣고 나머지는 columns() 순서대로.
-                int i = 1;
-                ps.setString(i++, d.vehicleId());
-                ps.setString(i++, d.bootId());
-                ps.setLong(i++, d.seq());
-                for (Object v : d.columns()) {
-                    setValue(ps, i++, v);
-                }
-                ps.addBatch();
+        ClickHouseInsert insert = ClickHouseInsert.forKind(kind);
+        try (PreparedStatement statement = conn.prepareStatement(insert.sql())) {
+            for (Decoded row : rows) {
+                insert.bind(statement, row);
+                statement.addBatch();
             }
-            ps.executeBatch();
-        }
-    }
-
-    private static void setValue(PreparedStatement ps, int i, Object v) throws SQLException {
-        if (v == null) {
-            ps.setObject(i, null);
-        } else if (v instanceof Map<?, ?> || v instanceof List<?> || v instanceof Object[]) {
-            ps.setObject(i, v);
-        } else {
-            ps.setObject(i, v);
+            statement.executeBatch();
         }
     }
 }

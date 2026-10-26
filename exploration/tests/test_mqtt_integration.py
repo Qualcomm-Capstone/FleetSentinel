@@ -312,8 +312,8 @@ def test_real_kafka_delivery_receipt_and_avro_contract(broker, kafka, tmp_path):
 
 def test_clickhouse_roster_ignores_late_history_and_preserves_zero_coordinate():
     # Execute the API's actual SQL, not a second hand-maintained copy of its aggregation.
-    source = (ROOT / "api/src/main/java/io/fleetsentinel/api/query/TelemetryQueries.java").read_text()
-    query = re.search(r'public List<Map<String, Object>> vehicles\(\).*?jdbc.query\("""(.*?)"""', source, re.S)[1]
+    source = (ROOT / "api/src/main/java/io/fleetsentinel/api/query/TelemetrySql.java").read_text()
+    query = re.search(r'String VEHICLES = """(.*?)"""', source, re.S)[1]
     setup = """
     CREATE DATABASE fleet;
     CREATE TABLE fleet.signals (vehicle_id String, scene_id String, boot_id String, seq UInt64,

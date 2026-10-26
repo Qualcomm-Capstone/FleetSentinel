@@ -1,5 +1,7 @@
 package io.fleetsentinel.pipeline.alert;
 
+import io.fleetsentinel.pipeline.source.TelemetryRecordMapper;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import io.fleetsentinel.pipeline.model.Decoded;
 import io.fleetsentinel.pipeline.model.Envelope;
@@ -110,7 +112,7 @@ class VehicleMonitorFunctionTest {
             record.put("values_num", Map.of("speed_mps", speed, "mission_active", 1.0,
                     "planned_stop", planned, "sensor_healthy", health));
             record.put("values_vec", Map.of()); record.put("values_str", Map.of("mission_id", "mission-1"));
-            return Decoded.signal(new Envelope(vehicle, "boot-1", seq, "signal", new byte[0], "test"), record, null, null);
+            return TelemetryRecordMapper.signal(new Envelope(vehicle, "boot-1", seq, "signal", new byte[0], "test"), record, null, null);
         }
     }
 }

@@ -108,6 +108,10 @@ JDK 21과 17을 설치한 뒤 루트에서 `./gradlew clean build`를 실행하�
 단위·게이트웨이 통합 테스트와 JAR 빌드를 수행합니다. Gradle은 Wrapper에 고정되어 있습니다.
 API·게이트웨이는 Java 21, Flink는 Java 17을 사용하며 산출물은 각 모듈의 `build/libs/`에 생성됩니다.
 
+실제 ClickHouse 조회 테스트는 `infra/clickhouse/001-schema.sql`을 적용한 **빈 일회용 DB**에서
+`./gradlew :api:integrationTest -PclickhouseTestUrl=jdbc:ch://localhost:8123/fleet`로 별도 실행합니다.
+테스트는 샘플 데이터를 적재하므로 운영·개발용 공유 DB를 지정하지 않습니다.
+
 `make mqtt-test`로 수집 정책·보존·ACK·명령 단위 테스트를,
 `make mqtt-integration-test`로 실제 MQTT·Kafka·ClickHouse 연동을 검증합니다.
 Flink 회귀 테스트는 `make flink-test`를 사용합니다.
