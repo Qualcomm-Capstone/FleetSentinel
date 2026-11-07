@@ -6,10 +6,12 @@ Use one owning process per database; SQLite handles threads inside that process.
 """
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 
 from .mqtt_contract import Batch, Record, STREAMS, MAX_BYTES, MAX_RECORDS, ack_for, identity, canonical
 
@@ -18,19 +20,36 @@ class CapacityError(RuntimeError):
     pass
 
 
+class StorageFullError(CapacityError):
+    """SQLite could not allocate space; the owning transaction was rolled back."""
+
+
 class TelemetryStore:
     def __init__(self, path, vehicle_id, *, max_batch_bytes=MAX_BYTES,
                  max_pending_bytes=256 * 1024 * 1024, retention_ms=60 * 60 * 1000,
-                 max_ring_bytes=256 * 1024 * 1024):
+                 max_ring_bytes=256 * 1024 * 1024, max_db_bytes=2 * 1024 ** 3):
         self.vehicle_id = identity(vehicle_id)
         if not 512 <= max_batch_bytes <= MAX_BYTES or min(max_pending_bytes, retention_ms, max_ring_bytes) <= 0:
             raise ValueError("invalid storage bounds")
+        if type(max_db_bytes) is not int or max_db_bytes < 256 * 1024:
+            raise ValueError("SQLite database limit must be at least 256 KiB")
         self.max_batch_bytes, self.max_pending_bytes = max_batch_bytes, max_pending_bytes
         self.retention_ms, self.max_ring_bytes = retention_ms, max_ring_bytes
         self.lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False)
+        self.path = Path(self.db.execute("PRAGMA database_list").fetchone()[2])
+        page_size = self.db.execute("PRAGMA page_size").fetchone()[0]
+        pages = max_db_bytes // page_size
+        if self.db.execute("PRAGMA page_count").fetchone()[0] > pages:
+            self.db.close()
+            raise ValueError("existing database exceeds max_db_bytes; increase the limit")
+        self.db.execute(f"PRAGMA max_page_count={pages}")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
+        # Keep SQLite's PASSIVE automatic checkpoint policy. The size limit
+        # reclaims oversized WAL files on reset; it is not an active-WAL hard cap.
+        self.db.execute("PRAGMA wal_autocheckpoint=1000")
+        self.db.execute("PRAGMA journal_size_limit=8388608")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS counters (stream TEXT PRIMARY KEY, next_seq INTEGER NOT NULL);
@@ -68,15 +87,19 @@ class TelemetryStore:
         with self.lock:
             # Nested operations participate in the outer command/observation transaction.
             nested = self.db.in_transaction
-            if not nested:
-                self.db.execute("BEGIN IMMEDIATE")
             try:
+                if not nested:
+                    self.db.execute("BEGIN IMMEDIATE")
                 yield
                 if not nested:
                     self.db.commit()
-            except BaseException:
+            except BaseException as exc:
                 if not nested:
                     self.db.rollback()
+                    # Convert only at the outer boundary: SQLITE_FULL can roll
+                    # back the entire transaction, including earlier statements.
+                    if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_FULL:
+                        raise StorageFullError("SQLite storage full; free space or raise --max-db-bytes") from exc
                 raise
 
     def get_meta(self, key):
@@ -185,6 +208,14 @@ class TelemetryStore:
         """
         if not 1 <= limit <= MAX_RECORDS:
             raise ValueError("invalid history drain limit")
+        try:
+            return self._drain_history(limit)
+        except StorageFullError:
+            # The selection is still pinned. Retry after ACKs free space; never
+            # make an already committed anomaly look like failed admission.
+            return 0
+
+    def _drain_history(self, limit):
         with self.atomic():
             rows = self.db.execute("SELECT r.id,r.payload,r.created_ms FROM ring r "
                                    "JOIN history_pending p ON p.ring_id=r.id ORDER BY r.id LIMIT ?",
@@ -202,6 +233,21 @@ class TelemetryStore:
     def ring_count(self):
         with self.lock:
             return self.db.execute("SELECT COUNT(*) FROM ring").fetchone()[0]
+
+    def storage_stats(self):
+        with self.lock:
+            page_size = self.db.execute("PRAGMA page_size").fetchone()[0]
+            pages = self.db.execute("PRAGMA page_count").fetchone()[0]
+            free = self.db.execute("PRAGMA freelist_count").fetchone()[0]
+            limit = self.db.execute("PRAGMA max_page_count").fetchone()[0]
+            wal = Path(str(self.path) + "-wal")
+            try:
+                wal_bytes = wal.stat().st_size
+            except FileNotFoundError:
+                wal_bytes = 0
+            return dict(database_bytes=pages * page_size, reusable_bytes=free * page_size,
+                        max_database_bytes=limit * page_size, wal_bytes=wal_bytes,
+                        filesystem_free_bytes=shutil.disk_usage(self.path.parent).free)
 
     def close(self):
         self.db.close()

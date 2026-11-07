@@ -2,6 +2,8 @@
 import json
 import queue
 
+import pytest
+
 from fleetsentinel_ingest.collection_policy import Collector
 from fleetsentinel_ingest.mqtt_contract import Batch, ack_for, canonical
 from fleetsentinel_ingest.mqtt_runtime import EdgeRuntime
@@ -36,16 +38,93 @@ class FakeConnection:
         self.sent.clear()
 
 
+@pytest.mark.parametrize("count", [1, 32, 128])
+def test_given_available_samples_when_tick_runs_then_bounded_group_commits(tmp_path, count):
+    with TelemetryStore(tmp_path / "edge.sqlite", "v1") as store:
+        conn, samples = FakeConnection(), queue.Queue()
+        runtime = EdgeRuntime(Collector(store), conn, samples)
+        groups = []
+        observe_batch = runtime.collector.observe_batch
+        def record_batch(batch):
+            groups.append(len(batch))
+            observe_batch(batch)
+        runtime.collector.observe_batch = record_batch
+        for t in range(count):
+            samples.put(json.dumps(signal(t)))
+
+        runtime.tick(1000, 1000)
+
+        assert groups == ([count] if count < 32 else [32] * (count // 32))
+        assert store.ring_count() == count
+        assert not runtime.pending
+        assert samples.empty()
+
+
+def test_given_anomaly_between_samples_when_admitted_then_commit_and_send_before_next_batch(tmp_path):
+    import sqlite3
+    path = tmp_path / "edge.sqlite"
+    with TelemetryStore(path, "v1") as store:
+        conn, samples = FakeConnection(), queue.Queue()
+        collector = Collector(store)
+        runtime = EdgeRuntime(collector, conn, samples)
+        for item in (signal(1000), {"signal": signal(2000), "anomaly": True}, signal(3000)):
+            samples.put(json.dumps(item))
+        observe_batch = collector.observe_batch
+        def check_batch(batch):
+            if batch[0][0]["sensor_time"] == 3000000:
+                with sqlite3.connect(path) as reader:
+                    assert reader.execute("SELECT COUNT(*) FROM outbox WHERE stream='event'").fetchone()[0] == 1
+                assert any(topic.endswith("/up/event") for topic, _ in conn.sent)
+            observe_batch(batch)
+        collector.observe_batch = check_batch
+
+        runtime.tick(1000, 1000)
+
+        assert store.ring_count() == 3
+        assert not runtime.pending
+
+
+def test_given_sqlite_full_when_tick_retries_then_keep_inputs_and_existing_ack_path(tmp_path):
+    with TelemetryStore(tmp_path / "edge.sqlite", "v1", max_db_bytes=256 * 1024) as store:
+        conn, samples = FakeConnection(), queue.Queue()
+        runtime = EdgeRuntime(Collector(store), conn, samples)
+        store.enqueue("event", "signal", b"keep", 0)
+        store.batch("event")  # Already persisted batch can still drain during pressure.
+        store.db.executescript("""
+            CREATE TABLE padding(data BLOB);
+            CREATE TRIGGER fill BEFORE INSERT ON ring
+            BEGIN INSERT INTO padding VALUES(zeroblob(524288)); END;
+        """)
+        for t in (1000, 2000):
+            samples.put(json.dumps(signal(t)))
+
+        runtime.tick(1000, 1000)
+
+        assert runtime.blocked
+        assert len(runtime.pending) == 2
+        assert store.ring_count() == 0
+        assert not runtime.collector.last
+        conn.ack_uploads()
+        runtime.tick(2000, 2000)
+        assert store.pending("event") == 0
+        assert runtime.blocked
+        store.db.execute("DROP TRIGGER fill")
+        runtime.tick(3000, 3000)
+        assert not runtime.blocked
+        assert not runtime.pending
+        assert store.ring_count() == 2
+
+
 def test_pressure_keeps_pending_input_commands_and_uploads_alive(tmp_path, caplog):
     with TelemetryStore(tmp_path / "edge.sqlite", "v1", max_pending_bytes=80) as store:
         conn, samples = FakeConnection(), queue.Queue(maxsize=128)
         runtime = EdgeRuntime(Collector(store, clock=lambda: 1000), conn, samples)
         samples.put(json.dumps({"signal": signal(channel="ms_imu"), "anomaly": True}))
         samples.put(json.dumps(signal()))
-        samples.put(json.dumps(signal(2000)))
+        samples.put(json.dumps(signal(2000, channel="fleet_status")))
         runtime.tick(1000, 1000)
         assert runtime.blocked
-        assert samples.qsize() == 1
+        assert samples.qsize() + len(runtime.pending) == 2
         assert store.pending("event") == 1
         assert len(conn.sent) == 2  # event and history published despite blocked admission
         assert "admission paused" in caplog.text
@@ -79,7 +158,7 @@ def test_full_outbox_restart_and_network_recovery_drain_before_readmitting(tmp_p
         for now in (1000, 2000, 3000):
             runtime.tick(now, now)
         assert runtime.blocked
-        assert samples.qsize() == 1
+        assert samples.qsize() + len(runtime.pending) == 2
         assert store.batch("event").wire() == original
         conn.online = True
         runtime.tick(4000, 4000)

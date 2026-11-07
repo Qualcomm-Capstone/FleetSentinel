@@ -7,7 +7,7 @@ import json
 import sqlite3
 
 from .mqtt_contract import canonical, identity
-from .collection_policy import Policy
+from .collection_policy import Policy, validate_clip_command
 
 
 class CommandStore:
@@ -20,12 +20,14 @@ class CommandStore:
     def submit(self, command, now_ms):
         identity(command["command_id"])
         identity(command["vehicle_id"])
-        if command["type"] not in ("collection_policy", "history_request", "diagnostic"):
+        if command["type"] not in ("collection_policy", "history_request", "diagnostic", "clip_request", "clip_status"):
             raise ValueError("unsupported operator command")
         if type(command["expires_at_ms"]) is not int or not now_ms < command["expires_at_ms"] <= now_ms + 300000:
             raise ValueError("command must expire within five minutes")
         if command["type"] == "collection_policy":
             Policy.from_command(command)
+        elif command["type"] in ("clip_request", "clip_status"):
+            validate_clip_command(command)
         wire = canonical(command)
         if len(wire) > 8192:
             raise ValueError("command too large")

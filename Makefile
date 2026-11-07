@@ -17,14 +17,14 @@ STORAGE_GROUP ?= fleetsentinel-storage
 .DEFAULT_GOAL := help
 .PHONY: mqtt-test mqtt-integration-test
 mqtt-test: ## MQTT 수집 정책·보존·명령·저장 확인 단위 테스트
-	cd exploration && PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_mqtt_collection.py tests/test_mqtt_edge_runtime.py
+	cd exploration && PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_mqtt_binary.py tests/test_mqtt_collection.py tests/test_mqtt_edge_runtime.py tests/test_sqlite_storage.py tests/test_clip_mqtt.py tests/test_clip_commands.py tests/test_clip_upload.py tests/test_clip_crash_boundaries.py tests/test_clip_runtime.py tests/test_clip_https.py tests/test_raw_lifecycle.py
 
 mqtt-integration-test: ## 격리된 MQTT/Kafka 컨테이너로 mTLS·ACL·재전송·저장 확인 검증
-	cd exploration && RUN_MQTT_INTEGRATION=1 PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_mqtt_integration.py
+	cd exploration && RUN_MQTT_INTEGRATION=1 PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_mqtt_integration.py tests/test_clip_mqtt_integration.py
 
 .PHONY: help up down restart ps logs topics smoke clean pull config ha-demo \
         certs gateway gateway-test ship ship-impersonate verify-kafka \
-        mcap ship-segments ch-schema flink-build flink-submit flink-test k8s-render \
+        mcap ch-schema flink-build flink-submit flink-test k8s-render \
         api api-build dashboard
 
 help: ## 명령 목록
@@ -66,6 +66,7 @@ ha-demo: ## Kafka HA broker-kill 데모 (ADR-009, 별도 토픽 사용)
 # 개발용 사설 PKI다. 공개 CA는 vehicle-0042 같은 이름을 발급해주지 않는다(SDD S-9).
 # 제조 프로비저닝·로테이션·폐기는 스코프 밖 — SDD L-7.
 PKI ?= ./pki
+MQTT_PKI ?= ./mqtt-pki
 JAVA21 ?= $(shell /usr/libexec/java_home -v 21 2>/dev/null)
 GRADLE := ./gradlew --console=plain
 
@@ -75,10 +76,11 @@ certs: ## 개발용 사설 CA + 차량 인증서 발급 (pki/)
 gateway-test: ## 게이트웨이 테스트 — 단위 + 통합 (임베디드 Kafka로 mTLS·사칭 차단까지)
 	$(GRADLE) :gateway:check
 
-gateway: ## 게이트웨이 기동 (gRPC 9090 mTLS · 관리 HTTP 8082)
+gateway: ## 게이트웨이 기동 (MQTT 클립 제어 · gRPC 9090 · 관리 HTTP 8082)
 	$(GRADLE) :gateway:bootJar
-	FLEETSENTINEL_PKI=$(PKI) \
+	FLEETSENTINEL_PKI=$(PKI) MQTT_PKI=$(MQTT_PKI) \
 	KAFKA_BOOTSTRAP=localhost:29092,localhost:29093,localhost:29094 \
+	OBJECT_STORE_PRESIGN_ENDPOINT=https://localhost:9443 \
 	$(JAVA21)/bin/java -jar gateway/build/libs/gateway-0.1.0.jar --spring.profiles.active=local
 
 ship: ## nuScenes 신호·객체 메타데이터 → WAL → 게이트웨이 → Kafka 종단 재생
@@ -88,10 +90,6 @@ ship: ## nuScenes 신호·객체 메타데이터 → WAL → 게이트웨이 →
 mcap: ## nuScenes 장면 → MCAP 클립 변환 (중량 경로 입력)
 	cd exploration && PYTHONPATH=. .venv/bin/python scripts/convert_scenes.py \
 	  --dataroot ../data/nuscenes --out ../data/mcap --scenes 3
-
-ship-segments: ## MCAP 클립 → MinIO(presigned) → segment-ref → Kafka
-	cd exploration && PYTHONPATH=. .venv/bin/python scripts/ship_segments.py \
-	  --pki ../$(PKI) --vehicle vehicle-0001 --mcap-dir ../data/mcap $(ARGS)
 
 # ── Flink 파이프라인 ───────────────────────────────────────────────────────
 FLINK_JAR := flink-pipeline/build/libs/flink-pipeline-0.1.0.jar

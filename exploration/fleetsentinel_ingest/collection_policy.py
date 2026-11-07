@@ -13,6 +13,16 @@ import fastavro
 from .mqtt_contract import canonical, identity
 
 
+def validate_clip_command(command):
+    if command["type"] == "clip_status":
+        identity(command["request_id"])
+        return
+    start, end = command["start_us"], command["end_us"]
+    if (type(start) is not int or type(end) is not int
+            or not 0 <= start < end or end - start > 60_000_000):
+        raise ValueError("clip window must be positive and at most 60 seconds")
+
+
 @dataclass(frozen=True)
 class Policy:
     version: int = 0
@@ -81,8 +91,15 @@ class Policy:
 
 
 class Collector:
-    def __init__(self, store, policy=None, clock=None):
+    MAX_OBSERVATION_BATCH = 32
+
+    def __init__(self, store, policy=None, clock=None, *, raw_store=None, clip_uploader=None):
         self.store = store
+        self.raw_store, self.clip_uploader = raw_store, clip_uploader
+        if raw_store is not None:
+            with store.atomic():
+                store.db.execute("CREATE TABLE IF NOT EXISTS raw_anomaly_episodes "
+                                 "(event_us INTEGER PRIMARY KEY, request_id TEXT NOT NULL)")
         self.clock = clock or (lambda: int(time.time() * 1000))
         saved = store.get_meta("policy")
         self._policy = Policy(**json.loads(saved)) if saved else (policy or Policy())
@@ -101,6 +118,9 @@ class Collector:
 
     def observe(self, row, *, now_ms=None, anomaly=False):
         now = self.clock() if now_ms is None else now_ms
+        event_us = row.get("sensor_time")
+        if anomaly and (type(event_us) is not int or event_us < 0):
+            raise ValueError("anomaly sensor_time must be nonnegative integer microseconds")
         buf = io.BytesIO()
         fastavro.schemaless_writer(buf, self.schema, row)
         payload = buf.getvalue()
@@ -115,6 +135,19 @@ class Collector:
                 # Promotion occurs once per anomaly episode, not once per anomalous sample.
                 if self.anomaly_until_ms <= now:
                     self.store.defer_history(now - policy.history_ms, now)
+                if self.raw_store is not None:
+                    # Raw incidents use event time independently of receive-time
+                    # focus. Buffered incidents can arrive seconds apart, and a
+                    # replayed older incident must still find its original pin.
+                    # Reuse only the existing clip's forward post-event window;
+                    # an earlier event needs its own pre-event history selection.
+                    episode = self.store.db.execute(
+                        "SELECT request_id FROM raw_anomaly_episodes WHERE event_us>? AND event_us<=? LIMIT 1",
+                        (event_us - 20000000, event_us)).fetchone()
+                    if episode is None:
+                        request_id = f"anomaly-{self.store.boot_id}-{event_us}"
+                        self.raw_store.anomaly(request_id, event_us, now_us=now * 1000)
+                        self.store.db.execute("INSERT INTO raw_anomaly_episodes VALUES (?,?)", (event_us, request_id))
                 self.store.set_meta("policy", json.dumps(asdict(self._policy)))
                 self.store.set_meta("anomaly_until_ms", str(anomaly_until))
                 result = "event"
@@ -141,6 +174,27 @@ class Collector:
             # outbox must not roll back the event or its focus policy.
             self.store.drain_history()
         return result
+
+    def observe_batch(self, observations):
+        """Commit already available normal samples together, without a wait timer.
+
+        A successful return admits the whole batch. The owner retains every input
+        on failure; reporting cursors must roll back along with SQLite rows.
+        Anomalies use observe(anomaly=True) as an independent durable boundary.
+        """
+        if not 1 <= len(observations) <= self.MAX_OBSERVATION_BATCH:
+            raise ValueError("invalid observation batch size")
+        with self.store.lock:
+            if self.store.db.in_transaction:
+                raise RuntimeError("observation batch must own its transaction")
+            previous = self.last.copy()
+            try:
+                with self.store.atomic():
+                    for row, received_ms in observations:
+                        self.observe(row, now_ms=received_ms)
+            except BaseException:
+                self.last = previous
+                raise
 
     def command(self, command):
         now = self.clock()
@@ -177,12 +231,34 @@ class Collector:
                     # Applied means the retained selection is durable, not that
                     # the upload has completed. Movement uses the bounded retry path.
                     result["records"] = self.store.defer_history(start, end)
+                elif command["type"] in ("clip_request", "clip_status"):
+                    if self.raw_store is None:
+                        raise ValueError("raw clip collection is disabled")
+                    validate_clip_command(command)
+                    if command["type"] == "clip_request":
+                        result["clip"] = self.raw_store.request_clip(
+                            command_id, command["start_us"], command["end_us"], now_us=now * 1000)
+                    else:
+                        result["clip"] = self.raw_store.request_status(command["request_id"])
+                        if result["clip"] is None:
+                            raise ValueError("unknown raw clip request")
+                    if self.clip_uploader is not None:
+                        result["clip_upload_states"] = self.clip_uploader.diagnostics()
+                        result["clip"]["uploads"] = {
+                            file_id: self.clip_uploader.status_for_file(file_id)
+                            for file_id in result["clip"].get("file_ids", [])}
                 elif command["type"] == "diagnostic":
                     result.update(pending_records=self.store.pending(),
+                                  storage=self.store.storage_stats(),
                                   deferred_history_records=self.store.deferred_history(),
                                   operator_focus_until_ms=self._policy.focus_until_ms,
                                   anomaly_focus_until_ms=self.anomaly_until_ms,
                                   policy_version=self.policy.version)
+                    if self.raw_store is not None:
+                        result["raw"] = self.raw_store.diagnostics()
+                        result["raw_replay_state"] = self.store.get_meta("raw_replay_state")
+                    if self.clip_uploader is not None:
+                        result["clip_upload_states"] = self.clip_uploader.diagnostics()
                 else:
                     raise ValueError("unsupported command type")
             except (KeyError, TypeError, ValueError) as exc:

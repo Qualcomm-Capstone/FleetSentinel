@@ -19,7 +19,7 @@ import pytest
 
 from fleetsentinel_ingest.collection_policy import Collector
 from fleetsentinel_ingest.mqtt_bridge import Bridge
-from fleetsentinel_ingest.mqtt_contract import canonical
+from fleetsentinel_ingest.mqtt_contract import BINARY_MAGIC, Batch, canonical
 from fleetsentinel_ingest.mqtt_runtime import Connection, EdgePump, EdgeRuntime, KafkaWriter, edge_receive
 from fleetsentinel_ingest.telemetry_store import TelemetryStore
 
@@ -218,7 +218,7 @@ def test_focus_anomaly_capacity_and_invalid_command_over_real_mqtt(broker, tmp_p
             while completed < len(writes):
                 writes[completed](None)
                 completed += 1
-            return samples.empty() and runtime.pending is None and store.pending() == store.deferred_history() == 0
+            return samples.empty() and not runtime.pending and store.pending() == store.deferred_history() == 0
         until(recovered)
         assert not runtime.blocked
         assert store.ring_count() == 2
@@ -263,7 +263,8 @@ def kafka():
         run("docker", "stop", "--time", "2", container)
 
 
-def test_real_kafka_delivery_receipt_and_avro_contract(broker, kafka, tmp_path):
+@pytest.mark.parametrize("wire_version", [1, 2])
+def test_real_kafka_delivery_receipt_and_avro_contract(broker, kafka, tmp_path, wire_version):
     from confluent_kafka import Consumer
     import fastavro
     import io
@@ -279,6 +280,13 @@ def test_real_kafka_delivery_receipt_and_avro_contract(broker, kafka, tmp_path):
             now = int(time.time() * 1000)
             collector.observe(dict(scene_id="test", channel="fleet_status", sensor_time=now * 1000,
                                    log_time=now * 1000, values_num={"speed_mps": 3.0}, values_vec={}, values_str={}))
+            batch = store.batch("status")
+            # Simulate an already-persisted v1 batch as well as a fresh v2 batch.
+            wire = Batch.create(batch.vehicle_id, batch.boot_id, batch.stream, batch.records,
+                                wire_version=wire_version).wire()
+            with store.atomic():
+                store.db.execute("UPDATE batches SET wire=? WHERE stream='status'", (wire,))
+            assert store.batch("status").wire().startswith(BINARY_MAGIC) == (wire_version == 2)
             pump = EdgePump(store, edge.publish)
             bridge = Bridge(writer, bridge_connection.publish)
             pump.tick(now)

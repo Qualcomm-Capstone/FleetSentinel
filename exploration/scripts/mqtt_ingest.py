@@ -20,7 +20,7 @@ from fleetsentinel_ingest.collection_policy import Collector, Policy
 from fleetsentinel_ingest.command_service import CommandStore
 from fleetsentinel_ingest.mqtt_bridge import Bridge
 from fleetsentinel_ingest.mqtt_contract import canonical, identity
-from fleetsentinel_ingest.mqtt_runtime import Connection, EdgeRuntime, KafkaWriter
+from fleetsentinel_ingest.mqtt_runtime import Connection, EdgeRuntime, KafkaWriter, RawReplayRuntime
 from fleetsentinel_ingest.telemetry_store import TelemetryStore
 
 
@@ -39,28 +39,59 @@ def main():
     parser.add_argument("--bootstrap", default="localhost:29092")
     parser.add_argument("--retention-ms", type=int, default=3600000)
     parser.add_argument("--max-pending-bytes", type=int, default=256 * 1024 * 1024)
+    parser.add_argument("--max-db-bytes", type=int, default=2 * 1024 ** 3,
+                        help="edge SQLite main-file limit including metadata; reserve extra disk for WAL/raw files")
+    parser.add_argument("--raw-spool", type=Path, help="managed raw directory, separate from source datasets")
+    parser.add_argument("--raw-mcap", type=Path, action="append", default=[],
+                        help="read-only source MCAP to replay at wall-clock speed; repeat for multiple files")
+    parser.add_argument("--object-ca", type=Path, help="additional object-storage CA; system roots trusted by default")
+    parser.add_argument("--raw-max-bytes", type=int, default=128 * 1024 ** 3)
+    parser.add_argument("--legacy-wal", type=Path, default=Path("./wal-segments"),
+                        help="legacy upload state must be drained before MQTT raw collection starts")
+    parser.add_argument("--retry-failed-clips", action="store_true",
+                        help="explicitly retry local failed uploads after an operator fix; keep job IDs and parts")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     identity(args.client_id)
     if args.role in ("edge", "operator") and args.db is None:
         parser.error("--db is required")
+    if args.raw_spool or args.raw_mcap or args.retry_failed_clips:
+        if args.role != "edge" or not args.raw_spool:
+            parser.error("raw clips require edge --raw-spool")
+        if any(path.suffix.lower() != ".mcap" for path in args.raw_mcap):
+            parser.error("--raw-mcap accepts only .mcap source files")
     if args.role == "edge":
         if not args.vehicle:
             parser.error("edge requires --vehicle")
         identity(args.vehicle)
-        subscriptions = [f"fleet/v1/{args.vehicle}/ack/+", f"fleet/v1/{args.vehicle}/command"]
+        subscriptions = [f"fleet/v1/{args.vehicle}/ack/+", f"fleet/v1/{args.vehicle}/command",
+                         f"fleet/v1/{args.vehicle}/clip/response"]
     elif args.role == "bridge":
         subscriptions = ["$share/ingestion/fleet/v1/+/up/+"]
     else:
         subscriptions = ["fleet/v1/+/reported"]
     connection = Connection(args.client_id, args.host, args.port, args.ca, args.cert, args.key, subscriptions)
     resource = None
+    raw_runtime = clip_uploader = None
     try:
         if args.role == "edge":
             resource = TelemetryStore(args.db, args.vehicle, retention_ms=args.retention_ms,
-                                      max_pending_bytes=args.max_pending_bytes)
+                                      max_pending_bytes=args.max_pending_bytes, max_db_bytes=args.max_db_bytes)
             policy = Policy(**json.loads(args.policy.read_text())) if args.policy else Policy()
-            collector = Collector(resource, policy)
+            raw_store = None
+            if args.raw_spool:
+                from fleetsentinel_ingest.raw_store import RawStore
+                from fleetsentinel_ingest.clip_upload import ClipUploader
+                from fleetsentinel_ingest.clip_mqtt import MqttClipTransport
+                from fleetsentinel_ingest.legacy_upload_guard import require_drained_legacy_uploads
+                require_drained_legacy_uploads(args.legacy_wal)
+                raw_store = RawStore(resource, args.raw_spool, max_bytes=args.raw_max_bytes)
+                transport = MqttClipTransport(connection, args.vehicle, object_ca=args.object_ca)
+                clip_uploader = ClipUploader(resource, raw_store, transport)
+                if args.retry_failed_clips:
+                    logging.info("Requeued %d failed raw uploads", clip_uploader.retry_failed())
+                raw_runtime = RawReplayRuntime(resource, raw_store, args.raw_mcap)
+            collector = Collector(resource, policy, raw_store=raw_store, clip_uploader=clip_uploader)
             samples = queue.Queue(maxsize=128)
             def read_input():
                 for line in sys.stdin:
@@ -75,8 +106,14 @@ def main():
             resource = CommandStore(args.db)
             if args.command:
                 resource.submit(json.loads(args.command.read_text()), int(time.time() * 1000))
-            receive = lambda topic, payload: resource.report(topic, json.loads(payload))
+            def receive(topic, payload):
+                result = json.loads(payload)
+                if resource.report(topic, result):
+                    print(json.dumps(result, sort_keys=True), flush=True)
         connection.start()
+        if clip_uploader:
+            clip_uploader.start()
+            raw_runtime.start()
         next_command = 0
         # Random initial phase avoids fleet-wide synchronized flushes.
         import random
@@ -100,6 +137,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if raw_runtime:
+            raw_runtime.close()
+        if clip_uploader:
+            clip_uploader.close()
         connection.close()
         if resource:
             resource.close()
