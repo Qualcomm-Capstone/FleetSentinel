@@ -381,14 +381,21 @@ Kafka 파티션 키는 `vehicle_id`, 저장 레코드 식별 키는 **`(vehicle_
 |---|---|
 | `vehicle_id` | 인증된 차량 식별자 |
 | `boot_id` | gRPC WAL의 생애 ID. MQTT에서는 차량·원천 boot·stream으로 생성한 UUIDv5 |
-| `seq` | 영속 수용한 레코드의 순번. MQTT는 stream별 발급 |
+| `seq` | 영속 수용한 레코드의 순번. MQTT는 stream별 발급. 서버 클립 참조는 `0` |
 | `kind` | SIGNAL / PERCEPTION / SEGMENT_REF |
 | `source_boot_id` | MQTT outbox의 원래 생애 ID |
 | `stream_id` | MQTT 전달 목적: `status` / `event` / `history` |
 | `report_interval_ms` | MQTT 보고 간격. 최신성·미수신 판단에 사용 |
+| `producer_origin` | 클립 제어 서버가 발행한 원본 참조는 `clip-upload` |
 
 MQTT는 stream별 `boot_id`를 생성해 같은 `seq`의 충돌을 피한다. 재전송에도 같은 식별 키를 유지한다.
 인증·배치·ACK·중복 제거의 상세 계약은 [MQTT 수집 계약](mqtt-contract.md#2-저장ack중복-제거의-상세-계약)를 따른다.
+
+MQTT 업로드 제어 서버는 파일별 작업 ID로 `boot_id=clip-<업로드 ULID>`, `seq=0`을 고정하고,
+`kind=RECORD_KIND_SEGMENT_REF`, `producer_origin=clip-upload`를 함께 보낸다. 참조 본문·헤더는
+PostgreSQL outbox에 한 번 저장해 재발행에서도 유지한다. Flink는 이 origin/kind 조합을 검증한 뒤
+센서 SeqWindow를 읽거나 갱신하기 전에 통과시킨다. 파일마다 생기는 boot가 차량 센서 순서 상태를
+초기화하거나 누적시키지 않도록 하기 위해서다. ClickHouse는 기존 식별 키로 재발행 중복을 처리한다.
 
 ### 5.1 신호 (`vehicle-signal`)
 
@@ -481,6 +488,57 @@ CAN 채널의 주요 값 제약:
 | `calibration` | map\<string\> | NOT NULL | 3D 재구성에 사용하는 채널별 외부·내부 파라미터(§7.2) |
 
 </details>
+
+#### 원본 파일과 요청·업로드 식별자
+
+운영자 요청 한 건이 여러 회전 파일과 겹칠 수 있고, 사건·운영자 요청 여러 건이 같은 파일을
+공유할 수 있다. 차량은 파일별 pin을 유지하고 같은 파일의 업로드를 재사용한다.
+
+| 식별자 | 범위·역할 |
+|---|---|
+| MQTT `command_id` | `clip_request` 명령의 멱등 키. 후속 `clip_status.request_id`에 전달 |
+| 차량 파일 ID | 관리 spool manifest의 영속 식별자. MQTT `create`의 `request_id`로 사용 |
+| 업로드 작업 `id` | 서버 발급 ULID. 생성 응답 유실 시 같은 차량·파일 request_id로 복구 |
+| `segment_id` | 서버 업로드 ULID. 참조 재발행에서도 동일 |
+
+관제 MQTT 명령의 요청 ID와 업로드 `create`의 파일 `request_id`는 서로 다른 단위다. 차량의 요청 조회 결과에는
+`requested`, `coverage`, `missing`, `partial`, `file_ids`, `uploaded_file_ids`가 포함된다.
+`uploads`는 파일별 전송 상태·재시도 횟수·다음 재시도 시각·오류·서버 작업 ID,
+`clip_upload_states`는 전송 상태별 건수를 제공한다.
+각 통신 시도의 `correlation_id`는 요청·응답 연결용이며 파일 멱등 키와 다르다.
+시간 구간은 센서 발생 시각의 epoch microseconds이며 `[start_us, end_us)`로 해석한다.
+`coverage`는 확보한 파일의 시간 범위를 요청 범위 안으로 잘라 합친 결과다. 센서별 모든 프레임의
+존재를 보장하는 지표가 아니므로 채널 목록·실제 샘플 수와 함께 확인한다.
+
+#### MQTT 업로드 메타데이터와 참조의 대응
+
+| MQTT `create` 필드 | 참조 필드·용도 |
+|---|---|
+| `request_id` | 차량별 파일 업로드 멱등 키 |
+| `t_start_us`, `t_end_us` | `t_start`, `t_end` |
+| `size_bytes`, `sha256` | `size_bytes`, `checksum`. 서버가 저장된 객체를 읽어 검증 |
+| `part_size_bytes` | multipart 분할 크기. 기본 16 MiB |
+| `scene_id`, `sensor_channels`, `sample_count` | 같은 이름의 참조 필드 |
+| `calibration` | 채널별 JSON 문자열의 map. 같은 이름의 참조 필드 |
+
+작업 조회는 `id`, `state`, `upload_id`, `blob_uri`, `size_bytes`, `sha256`, `part_size_bytes`,
+`error`를 반환한다. 업로드 작업의 `COMPLETED`와 Avro 참조의 `UPLOADED`는 다른 필드다.
+서버는 객체 검증 후 `UPLOADED` 참조를 준비하고, Kafka ACK까지 DB에 기록한 뒤 작업을
+`COMPLETED`로 만든다. 차량은 이 receipt를 SQLite에 저장한 뒤 pin을 해제한다.
+MQTT `part_urls` 응답에는 현재 `upload_id`가 포함되며 `complete` 요청도 `upload_id`와 `parts`를 함께 보낸다.
+만료된 multipart는 같은 작업 ID 아래 새 `upload_id`로 복구할 수 있다. 이전 세대 `complete`는 MQTT 응답의 `status=409`이며,
+차량은 새 세대를 조회한 뒤 ETag를 초기화하고 part를 다시 전송한다.
+클립 종료 시각은 ClickHouse `DateTime64(6)` 범위에 맞춰 UTC 2300-01-01 미만이어야 한다.
+
+#### 원본 로컬 보존량
+
+원본 관리 spool의 기본 상한은 1시간·128 GiB다. 신호 ring의 1시간·256 MiB와 별도로 계산한다.
+보존 기간은 로컬 파일 생성 시각, 구간 선택은 센서 발생 시각을 사용한다.
+§4의 원천 발생량 25.89 MiB/s를 연속 기록하면 시간당 약 91 GiB, 사건 30초는 약 777 MiB다.
+이 계산은 payload 발생량 기준이며 MCAP 오버헤드·캘리브레이션·선택된 미확인 파일이 더해진다.
+1시간·128 GiB는 이 프로젝트의 자원 절충이며 장치가 항상 1시간을 확보한다는 보장은 아니다.
+선택된 미확인 파일은 자동 만료하지 않으며 공간을 모두 차지하면 새 원본 수용에 실패한다.
+회전·전송·용량 정책과 선택 구간의 근거는 [SDD S-2](sdd.md#s-2--p-2-사건요청-기반-원본-선택과-보존-정책)를 따른다.
 
 ### 5.4 실패 격리 (`dlq-envelope`)
 

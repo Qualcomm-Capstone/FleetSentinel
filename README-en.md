@@ -40,18 +40,25 @@ Measured figures (rates, sizes, formats, and per-channel detail) are listed in [
 ## Architecture
 
 The current path is selective collection → SQLite outbox → MQTT → bridge → Kafka.
-MQTT also carries collection policies and command results. Existing gRPC ingestion and raw-upload control remain available.
+MQTT also carries collection policies, clip requests and command results. Existing gRPC Ingest remains available.
+Raw clips use mTLS MQTT control and presigned HTTPS multipart upload.
 See [System Design](docs/sdd.md) for the current architecture. Cloud HA and fleet-scale capacity are not yet validated.
 
 Signals and object metadata go through Kafka and Flink. Raw sensor files go to object storage, with
 references recorded in Kafka. ClickHouse's clip catalog connects the two paths.
+
+The upload server persists jobs and a reference outbox in shared PostgreSQL. It returns `COMPLETED` after
+object size/SHA-256 verification and a durable record of the reference's Kafka ACK. The vehicle saves that
+receipt before releasing the file's retention pin. Vehicle anomaly inputs and an operator CLI select clips;
+hardware drivers and automatic clip requests from Flink alerts remain outside this implementation.
 
 ## Key Design Decisions
 
 | Problem | Solution |
 |---|---|
 | 58× bandwidth asymmetry | **Claim-Check** — references on the bus, payloads in storage |
-| Continuous raw-upload cost | **Event/request-based clips** — file upload is implemented; real-vehicle triggers and automatic retention remain open |
+| Continuous raw-upload cost | **Event/request-based clips** — 10 seconds before and 20 seconds after an event; unselected raw history defaults to 1 hour / 128 GiB |
+| Interrupted raw uploads | **MQTT upload jobs + shared PostgreSQL outbox** — release local pins after object verification and reference Kafka ACK |
 | Recovery after an interrupted upload | **MQTT + SQLite outbox + application ACK**, with legacy gRPC WAL/CACK retained |
 | Sensor rates span hundreds-fold | **Three timestamps** + keyframe synchronization anchor |
 | Coordinates are not lat/lon | **Official-origin ENU→WGS84 conversion** |
@@ -68,6 +75,7 @@ references recorded in Kafka. ClickHouse's clip catalog connects the two paths.
 | Ingest and buffering | Apache Kafka | Buffers vehicle records, fans them out to processing and storage, and supports replay |
 | Stream processing | Apache Flink | Maintains per-vehicle state for deduplication, validation, coordinate conversion, and ODD detection |
 | Raw storage | Object storage + MCAP | Stores large sensor clips as files for later replay |
+| Raw upload control | MQTT · PostgreSQL · JPA · Flyway | MQTT mTLS and topic ACLs; durable jobs, reference outbox and completion receipts |
 | Time-series storage | ClickHouse | Stores and queries signals, object metadata, and the clip catalog |
 | API | Spring Boot | Exposes ClickHouse queries and Kafka alerts through REST and SSE |
 | Console | React · MapLibre GL · uPlot · Rerun | Shows vehicle positions, signals, alerts, and sensor clips |
@@ -84,6 +92,7 @@ Current scope and limitations are listed in [SDD §4.2](docs/sdd.md).
 - **The console uses a mock stream by default.** `make dashboard` connects it to the real API, but Kafka→Flink→API latency and recovery have not been measured end to end.
 - **The source is 2 vehicles with a 20-second continuity ceiling.** "N vehicles" means N concurrent streams, not N distinct real vehicles.
 - **Cloud HA is unverified.** Kafka broker-level failover was tested on one host; MQTT uses a single local broker. Host/zone failures and mass reconnection remain open.
+- **Raw retention is capacity-limited.** Selected, unconfirmed files never expire automatically. A full spool blocks new raw input. The 1-hour / 128-GiB defaults are project choices based on the measured source rate.
 - **3D boxes come from nuScenes annotations.** They are not produced by the vehicle and are used only to show surrounding objects in the dashboard.
 - **Radar payloads unparsed** — `.pcd` files are stored in MCAP but not decoded or visualized.
 
@@ -92,9 +101,10 @@ Current scope and limitations are listed in [SDD §4.2](docs/sdd.md).
 ```
 FleetSentinel/
 ├── frontend/         # (React) ops console — map, time series, clip search, sensor replay
-├── exploration/      # (Python) measurement/verification tools + vehicle-side loss prevention (WAL, ack, dedup)
+├── exploration/      # (Python) MQTT, raw recording/retention, MQTT upload control and data tools
+├── gateway/          # (Java) MQTT raw upload control, PostgreSQL outbox and legacy gRPC Ingest
 ├── flink-pipeline/   # (Java) dedup, validation, coordinate derivation, ODD detection
-├── infra/            # docker-compose (Kafka ×3, Flink, ClickHouse, MinIO)
+├── infra/            # docker-compose (Kafka ×3, Flink, ClickHouse, PostgreSQL, MinIO)
 ├── schemas/          # canonical Avro schemas
 ├── scripts/          # infra smoke tests · Kafka HA demo
 └── docs/             # design documents
@@ -114,6 +124,12 @@ For fast unit tests, run `./gradlew :api:test :gateway:test :flink-pipeline:test
 The gateway defaults to the AWS credential chain, including IAM roles. Select local MinIO with
 `--spring.profiles.active=local` (already used by `make gateway`). Explicit static keys require
 `fleetsentinel.object-store.credentials-mode=static`.
+
+MQTT clip control requires shared PostgreSQL and MQTT mTLS; management uses port 8082.
+Flyway applies the database schema. Object transfers also use HTTPS, with the vehicle certificate presented only
+to the MQTT broker. The clip REST endpoints have been removed. Raw files rotate at 10 seconds or 256 MiB. A single upload worker sends selected
+files in 16-MiB parts at up to 4 MiB/s. Retire legacy SegmentUpload after draining pending uploads and references;
+keep gRPC Ingest. See [System Design](docs/sdd.md) for rollout, rollback and multipart cleanup requirements.
 
 Use `make mqtt-test` for collection policy, durability, ACK and command tests,
 `make mqtt-integration-test` for real MQTT/Kafka/ClickHouse integration,

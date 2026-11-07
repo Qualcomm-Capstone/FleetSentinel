@@ -1,15 +1,17 @@
-# FleetSentinel — System Design Document (v3.1)
+# FleetSentinel — System Design Document (v3.2)
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 3.1 — 상황·센서별 선택적 수집과 MQTT 전환 |
-| 상태 | MQTT 경로 로컬 구현·검증 / 기존 gRPC 유지 / 클라우드 운영 전환 전 |
-| 최종 갱신 | 2026-10-26 |
-| 변경 범위 | 수집 정책, 차량 통신, 저장 확인, 하행 명령, 지연 데이터 처리 |
+| 버전 | 3.3 — MQTT 원본 업로드 제어 |
+| 상태 | 로컬 구현 / 기존 gRPC 수집 유지 / 클라우드 운영 전환 전 |
+| 최종 갱신 | 2026-10-27 |
+| 변경 범위 | 원본 기록·보존, 클립 명령, MQTT 업로드 제어, 공유 DB와 참조 outbox |
 | 관련 문서 | [전환 근거](mqtt-migration.md) · [MQTT 수집 계약](mqtt-contract.md) · [데이터 설계](data-design.md) |
 
 이 문서는 **현재 시스템 설계의 정본**이다. 이전의 고주파 gRPC·저주파 MQTT 구분과 전량 전송 전제를 대체한다.
-기존 gRPC 코드는 마이그레이션·회귀 검증 및 원본 업로드 제어를 위해 유지한다.
+기존 gRPC 수집은 회귀·재생 경로로 유지한다. 원본 업로드 제어는 MQTT로 통일하며,
+새 코드에서 SegmentUpload와 `ship_segments`를 제거했다. 이 버전을 적용하기 전에 기존 배포에서
+진행 중 업로드와 참조를 drain해야 한다(§5.2).
 
 수치는 **원천 데이터 실측**, **설계 목표**, **설정 기본값**, **검증 결과**로 구분한다.
 nuScenes 원천의 발생량은 [데이터 설계 §4](data-design.md)의 값이며, 선택 정책 적용 후 클라우드 입력량과 같지 않다.
@@ -80,19 +82,26 @@ gRPC에서도 같은 선택 정책·배칭·양방향 명령을 구현할 수 �
 
 #### 원본 파일 업로드와 클립 참조
 
-```text
-차량의 카메라·라이다 원본
-  → 로컬 보관 → 사건/관제 요청 구간 선택 [실차 정책·자동화 미완료]
-  → MCAP 파일
-  → gRPC SegmentUpload API로 업로드 제어
-  → presigned HTTPS multipart → 오브젝트 스토리지
-  → 완료 확인 → 기존 WAL에 segment-ref 기록
-  → 기존 gRPC 수집 경로 → Kafka telemetry.records
-  → Storage Job → ClickHouse 클립 카탈로그
+```mermaid
+flowchart TD
+    R["차량 원본 입력"] --> M["관리 spool의 MCAP 기록·회전"]
+    E["차량 이상 입력 / 운영자 clip_request"] --> P["SQLite 요청·선택 파일 pin"]
+    M --> P
+    P --> U["MQTT<br/>원본 업로드 제어"]
+    U --> D[("공유 PostgreSQL<br/>업로드 작업·참조 outbox")]
+    P -->|"presigned HTTPS multipart"| O["오브젝트 스토리지"]
+    O --> V["서버 크기·SHA-256 검증"]
+    V --> D
+    D -->|"segment-ref 재시도"| K["Kafka telemetry.records"]
+    K -->|"ACK 영속 기록"| C["COMPLETED"]
+    C -->|"MQTT 응답 · 차량 receipt 저장"| F["pin 해제·보존 정책 적용"]
+    K --> S["Storage Job → ClickHouse 클립 카탈로그"]
 ```
 
-파일 업로드·참조 발행·재시도 경로는 구현돼 있다. 실차의 원본 ring buffer, 사건 전후 자동 분할,
-보존 기간 만료 삭제는 별도 구현 대상이다. MQTT signal ring buffer 구현을 원본 MCAP 수명주기 구현으로 간주하지 않는다.
+차량은 기록 중인 원본을 회전하고, 사건·요청과 겹치는 파일을 고정한다. 선택 목록과 명령 결과는
+신호 outbox와 같은 SQLite DB에 저장한다. 업로드 worker는 신호 전송과 별도로 동작한다.
+원본 트리거는 차량의 이상 입력과 운영자 CLI다. Flink 경보가 원본 요청을 자동 발행하는 연결과
+실제 카메라·CAN·LiDAR 드라이버는 현재 범위에 포함하지 않는다.
 
 원본은 MQTT/Kafka에 직접 싣지 않고 `blob_uri`·체크섬·시간 범위·캘리브레이션을 참조로 전달한다.
 클립 참조의 Kafka 토픽도 `telemetry.records`이며 `kind` 헤더로 식별한다.
@@ -106,10 +115,11 @@ gRPC에서도 같은 선택 정책·배칭·양방향 명령을 구현할 수 �
 |---|---|---|---|
 | 스트림 버스 | **Apache Kafka** (KRaft) | 4.x | 3-broker RF=3 / ISR=2로 broker-level HA 실증 |
 | 스트림 처리 | **Apache Flink** | **2.0.0** | Docker 이미지와 Gradle 의존성을 같은 버전으로 고정. **PyFlink는 기각**(§4.1 A-13) — 커넥터·API 조합 때문이며 성능 문제는 아니다 |
-| 원시 로그 저장 | 오브젝트 스토리지 + **MCAP** | — | S3 호환 API로 접근한다. 로컬은 MinIO, 배포 시 GCS의 S3 호환(XML) 엔드포인트를 사용한다. `s3://`는 접근 프로토콜을 나타낸다. MCAP은 ROS 2 기본 bag 포맷 |
+| 원시 로그 저장 | 오브젝트 스토리지 + **MCAP** | — | 로컬 MinIO, 배포 대상의 S3 multipart API와 호환성을 검증한다. `s3://`는 객체 참조 형식이다 |
 | 구조화 저장·질의 | **ClickHouse** | **26.3 LTS** (`:lts` 태그) | §4.1 A-8 |
 | API | **Spring Boot** | **4.0.x** (2025-11 릴리스) | Spring Framework 7.x · Jakarta EE 11 · Servlet 6.1 |
-| 기존 수집·파일 제어 | Spring Boot + Spring gRPC | 4.0.x / 1.0.3 | 기존 수집의 회귀·전환 경로와 SegmentUpload API 유지 |
+| 원본 업로드 제어 | Spring Boot MQTT adapter · JPA · Flyway · PostgreSQL | 저장소 설정 기준 | MQTT mTLS·CN ACL, 공유 DB에 작업·검증 상태·참조 outbox 보존. 관리 포트 8082 |
+| 기존 수집 | Spring Boot + Spring gRPC | 4.0.x / 1.0.3 | WAL·CACK 수집 유지. 제거된 SegmentUpload는 전환 전 기존 배포에서 drain |
 | 프론트엔드 | **React + Vite** | — | 대시보드는 클라이언트 앱 — SSR 불필요 |
 | 지도 | **MapLibre GL JS** | — | 오픈소스. 궤적이 많아지면 deck.gl 추가 |
 | 시계열 차트 | **uPlot** | — | 시계열 특화, 경량 |
@@ -143,7 +153,9 @@ Spring Boot 4 API는 Java 21로 실행하고, Docker의 Flink 2.0.0 이미지와
 
 | 범위 | 현재 상태 |
 |---|---|
-| 기존 gRPC 수집·파일 업로드 | 유지. WAL·CACK·파일 업로드 회귀 테스트 수행 |
+| 기존 gRPC 수집 | WAL·CACK 회귀·재생 경로 유지 |
+| 사건 원본 수명주기 | 관리 spool, MCAP 회전, 사건·요청 pin, MQTT 제어 + HTTPS worker. 실차 드라이버 연동 전 |
+| MQTT 업로드 제어 서버 | 공유 PostgreSQL 작업·참조 outbox, 객체 검증, Kafka ACK 후 완료 처리 |
 | MQTT 수집 정책·보존·명령 | JSONL 차량 어댑터와 운영자 CLI로 로컬 구현 |
 | MQTT→Kafka | 실제 브로커를 사용한 mTLS·ACL·재전송·저장 확인 테스트 수행 |
 | Flink | Alert/Storage 독립 Job. MQTT 식별·history 제외·보고 간격별 watchdog 구현 |
@@ -260,13 +272,100 @@ MQTT 처리량은 in-flight 설정·RTT·배치 크기·서버 자원 등에 영
 
 카메라·라이다 원본은 오브젝트 스토리지로 업로드하고, Kafka에는 참조·체크섬·시간 범위를 전달한다.
 원본은 그대로 보존 정책의 대상이며 메시지 버스에서 픽셀·점군을 중계하지 않는다.
-기존 gRPC SegmentUpload와 presigned HTTPS 경로를 유지한다.
+제어와 참조 메타데이터 전달은 MQTT, 본문 전송은 presigned HTTPS multipart를 사용한다.
+차량 신원은 브로커의 인증서 CN·토픽 ACL로 바인딩한다. 관리 포트는 8082다.
+
+#### 업로드 상태와 완료 조건
+
+```mermaid
+stateDiagram-v2
+    [*] --> CREATING: 요청·객체 키 DB 저장
+    CREATING --> UPLOADING: multipart 생성
+    UPLOADING --> VERIFYING: complete 접수
+    VERIFYING --> UPLOADING: multipart 만료 / 새 upload_id
+    VERIFYING --> STORED: 객체 크기·SHA256 검증 / 참조 outbox 저장
+    STORED --> COMPLETED: Kafka ACK DB 저장
+    CREATING --> ABORTING: 취소
+    UPLOADING --> ABORTING: 취소
+    ABORTING --> ABORTED: 정리 완료
+    VERIFYING --> FAILED: 검증 실패
+```
+
+`COMPLETED`는 객체 검증과 참조의 Kafka 저장 확인이 모두 영속 기록된 상태다. 차량은 이 결과를
+로컬 receipt로 저장한 뒤 파일의 pin을 해제한다. ClickHouse 카탈로그 반영은 하류 처리로 이어진다.
+서버가 Kafka ACK를 받은 직후 중단되면 참조를 다시 발행할 수 있으므로 같은 식별자로 중복을 처리한다.
+
+| MQTT operation | 계약 |
+|---|---|
+| `create` | 차량 파일 `request_id`와 불변 메타데이터 등록. 같은 요청은 같은 작업 반환 |
+| `status` | 영속 작업 상태 조회 |
+| `part_urls` | 필요한 part 번호의 URL과 현재 `upload_id` 반환 |
+| `complete` | 현재 세대의 part 번호·ETag 접수, 비동기 객체 검증·참조 발행 |
+| `cancel` | 검증 시작 전 취소. `VERIFYING` 이후 status 409 |
+
+요청은 `fleet/v1/{vehicle_id}/clip/request`, 응답은 같은 차량의 `clip/response`다.
+같은 차량·파일 `request_id`에 다른 메타데이터를 보내면 409다. 생성 응답 유실은 동일 본문으로,
+완료 응답 유실은 상태 조회·동일 완료 요청으로 복구한다. 각 시도의 `correlation_id`와 operation을
+대조해 늦은 응답을 버린다. MQTT PUBACK는 파일 등록 완료가 아니며 `COMPLETED` receipt가 필요하다.
+메타데이터 필드 대응은 [데이터 설계 §5.3](data-design.md), 메시지와 복구 계약은
+[MQTT 수집 계약](mqtt-contract.md#원본-업로드-제어와-참조-메타데이터)을 따른다.
+
+#### 공유 상태와 장애 복구
+
+게이트웨이는 PostgreSQL을 JPA로 사용하고 Flyway로 스키마를 관리한다. 작업·참조 outbox와 worker
+소유권은 공유 DB에 둔다. 서버 증설 시 모든 인스턴스가 같은 DB·오브젝트 스토리지·Kafka를 사용해야 한다.
+DB 가용성, worker lease와 중복 처리, 객체 검증 용량도 확장 계획에 포함한다.
+
+DB 트랜잭션과 S3 multipart 생성·완료는 원자적으로 묶이지 않는다. 먼저 영속 저장한 객체 키를
+기준으로 재시도·대사하고, 완료 응답이 유실돼도 객체 존재와 검증 결과를 확인해 작업을 이어간다.
+장기 단절 중 미완료 multipart가 만료되고 완성 객체도 없으면 같은 작업 ID에 새 `upload_id`를 발급해
+`UPLOADING`으로 복구한다. `VERIFYING`에서도 이 복구가 가능하다. 이전 세대의 complete는 409로 거절하며,
+차량은 MQTT `status`로 새 세대를 확인하고 기존 ETag를 비운 뒤 모든 part를 다시 보낸다.
+서버 검증 worker는 인스턴스당 2개로 제한하고 전체 파일의 SHA-256을 확인한다. 이 다운로드 비용은 서버·스토리지
+대역폭에 포함해야 한다. DB 백업·복구 시 작업 상태와 객체 목록의 재대사가 필요하다.
+
+미완료 multipart의 최종 정리는 운영 설정으로도 보장해야 한다. AWS S3는 7일 뒤 미완료 multipart를
+중단하는 [lifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html)을
+적용한다. 로컬 MinIO는 [stale upload 설정](https://github.com/minio/minio/blob/master/docs/config/README.md)에 따라
+`MINIO_API_STALE_UPLOADS_EXPIRY=168h`를 사용한다.
+MinIO에 S3의 `AbortIncompleteMultipartUpload` lifecycle 지원을 가정하지 않는다.
 
 ### S-2 ← P-2. 사건·요청 기반 원본 선택과 보존 정책
 
-차량 사고·이상 판단·관제자 요청을 원본 업로드 트리거로 사용하고, 비선택 원본은 정책상 보존 기간 이후 삭제한다.
-사건 전후 시간 범위·보존 기간·용량·개인정보 정책은 아직 확정하지 않았다.
-실제 업로드 API·MCAP 변환은 존재하지만 실차의 자동 트리거·원본 ring 수명주기는 구현 전이다.
+차량의 `anomaly=true` 입력과 관제자의 `clip_request`로 구간을 선택한다. 같은 이상 에피소드는
+한 번만 선택하고, 관제 명령은 `command_id`로 멱등 처리한다. 요청과 선택 파일 pin, 명령의 `applied`
+결과를 같은 SQLite 트랜잭션으로 기록한다. `applied`는 수용한 요청의 영속 저장을 뜻한다.
+원본 사건 시각은 신호의 `sensor_time`을 사용하며 원본용 에피소드 상태를 별도로 영속 기록한다.
+버퍼에 쌓인 사건을 나중에 처리해도 처리 시각으로 구간을 옮기거나 서로 다른 사건을 합치지 않는다.
+기존 사건 시각부터 20초 후 경계 전까지의 입력만 같은 선택을 재사용한다. 더 이른 사건과
+20초 후 경계부터의 사건은 새 구간을 선택하며, 동일 사건 시각은 재시작 후에도 중복 선택하지 않는다.
+
+| 항목 | 기본값·동작 |
+|---|---|
+| 비선택 원본 보존 | 최근 1시간, 관리 spool 128 GiB. 기간·용량 중 먼저 도달하는 상한 적용 |
+| 사건 구간 | 발생 10초 전부터 20초 후까지 |
+| 운영자 요청 | 센서 발생 시각의 `[start_us, end_us)`, 요청당 최대 60초 |
+| MCAP 회전 | 10초 또는 256 MiB를 기준으로 파일 분할 |
+| 업로드 | 16 MiB part, 최대 4 MiB/s, 차량당 worker 1개 |
+| 미확인 선택 파일 | 기간이 지나도 유지. 서버 `COMPLETED` receipt를 저장한 뒤 pin 해제 |
+| 용량 포화 | 삭제 가능한 비선택 파일부터 정리. 선택 파일로 가득 차면 새 원본 수용을 중단하고 실패 보고 |
+
+선택은 요청과 겹치는 파일 단위다. 파일 경계 때문에 실제 업로드 범위가 요청보다 넓을 수 있다.
+보존 기간은 로컬 파일 생성 시각으로 계산하고 구간 선택은 센서 발생 시각을 사용한다.
+아직 도착하지 않은 사건 후 구간은 요청을 보존해 후속 파일을 선택한다. 이미 만료된 과거 구간,
+센서 결손, 원천 재생 종료로 확보하지 못한 범위는 `coverage`·`missing`·`partial`에 드러낸다.
+모든 선택 파일의 업로드 완료와 요청 범위 전체 확보는 서로 다른 상태다.
+
+10초 전·20초 후는 [Samsara Panic Button 데이터시트](https://www.samsara.com/ca/pdf/docs/Panic_Button_Data_Sheet_Final.pdf)의
+이벤트 영상 구간을 참고한 프로젝트 기본값이다. 원천 25.89 MiB/s를 연속 기록하면 시간당 약 91 GiB가
+생기므로 1시간·128 GiB를 로컬 자원과 사고 조사 구간의 절충으로 정했다. 이 보존량은 산업 공통 기준이
+아니며, 파일 오버헤드·미확인 pin이 차지하는 공간에 따라 실제 확보 가능한 이력은 줄어든다.
+같은 발생량의 30초 구간은 약 777 MiB이며 4 MiB/s로 전송하는 데 최소 약 194초가 필요하다.
+
+삭제 대상은 이 DB에 등록된 관리 spool 파일로 한정한다. nuScenes 원천 디렉터리는 spool로 채택하지 않는다.
+원본 recorder는 메시지를 파일에 flush·fsync한 뒤 SQLite의 확보 범위를 갱신한다. 복구 시 마지막
+불완전 레코드를 제외하고 닫힌 MCAP으로 복원한다. 이 기록 방식의 디스크 비용과 실시간 처리율은 장치에서 측정해야 한다.
+실제 장치의 입력 역압·전원 손실·디스크 내구성, 개인정보 보존 기준은 운영 전 검증·결정 대상이다.
 
 ### S-3 ← P-3. 선택적 전송과 영속 outbox 기반 배칭
 
@@ -382,7 +481,8 @@ MQTT의 boot/stream별 state는 로그 세대 수에 따라 증가할 수 있다
 
 #### 기존 gRPC 경로의 유지 범위
 
-gRPC는 기존 재생기 회귀 검증과 원본 파일 업로드 제어에 사용한다. MQTT outbox와 별도 계약이다.
+gRPC Ingest는 기존 재생기와 WAL·CACK 회귀 검증에 사용한다. MQTT outbox와 별도 계약이다.
+SegmentUpload 퇴역은 이 수집 경로의 삭제를 의미하지 않는다.
 
 - 차량의 append-only WAL에 seq·kind·payload·CRC를 기록하고 커밋 포인터로 재전송 위치를 복구한다.
 - 그룹 커밋을 사용하므로 fsync 전 데이터의 전원 손실 가능성이 남는다. 프로세스 강제 종료 시험과 구분한다.
@@ -405,6 +505,7 @@ gRPC는 기존 재생기 회귀 검증과 원본 파일 업로드 제어에 사�
 | 경로 | 신원 기준 | 검증 |
 |---|---|---|
 | 기존 gRPC | 인증서 SAN URI의 vehicle ID | 주장된 ID와 대조 후 Kafka 키 결정 |
+| 원본 MQTT 제어 | 인증서 CN으로 보호한 요청 토픽의 vehicle ID | 작업 소유 차량 확인. 타 차량 요청·응답 토픽과 작업 접근 거절 |
 | MQTT | 개발 인증서 CN을 username/clientId로 사용 | 차량별 토픽 ACL + bridge의 토픽/본문 ID 대조 |
 | bridge | 서비스 전용 인증서 | 업링크 구독 및 application ACK 발행만 허용 |
 | 명령 dispatcher | 서비스 전용 인증서 | command 발행·reported 구독 |
@@ -695,7 +796,7 @@ API 인스턴스마다 consumer group을 따로 쓴다. 같은 consumer group으
 | ID | 항목 | 현재 한계 |
 |---|---|---|
 | L-1 | 실차 연동 | nuScenes/JSONL 입력으로 검증. 실제 센서·무선망·차량 안전 판단 검증 전 |
-| L-2 | 온보드 소프트웨어 | 신호 ring/outbox·정책은 로컬 구현. 실차 어댑터와 원본 MCAP 자동 분할·보존·삭제는 미완료 |
+| L-2 | 온보드 소프트웨어 | 신호 ring/outbox와 원본 spool 수명주기는 로컬 구현. 실제 센서 드라이버·장치 자원 검증 전 |
 | L-3 | 클라우드 HA | 로컬 단일 MQTT 브로커. Kafka broker-level 검증과 호스트·존 장애 보장은 구분 |
 | L-4 | 객체 메타데이터 | nuScenes 주석 재생이며 실시간 차량 인식 결과가 아님. MQTT 기본 Collector는 신호용 |
 | L-5 | 레이더 | MCAP 보존은 있으나 별도 해석·시각화는 미완료 |
@@ -712,6 +813,8 @@ API 인스턴스마다 consumer group을 따로 쓴다. 같은 consumer group으
 | L-16 | 명령 운영 | 단일 dispatcher/SQLite. 공유 DB·리더십·fleet 전체 고빈도 차량 상한 필요 |
 | L-17 | 상태·용량 관리 | CLI의 포화 로그·입력 대기·전송 복구 구현. 운영 경보 연동·원천 입력 재공급·명령 기록 및 Flink boot별 state 정리 정책 필요 |
 | L-18 | Flink 전환 | 신규 key/직렬화 구조의 기존 savepoint 호환과 운영 offset handover 검증 전 |
+| L-19 | 원본 업로드 운영 | PostgreSQL HA·백업 복구·대규모 검증 worker 부하·장기 multipart 정리 운영 검증 전 |
+| L-20 | 원본 로컬 메타데이터 | 완료 요청·receipt·삭제 파일 기록을 SQLite에 유지하며 자동 정리 없음. 128 GiB 원본 payload 상한과 별도로 DB 용량 관리 필요 |
 
 ---
 
@@ -737,6 +840,20 @@ shadow 실험은 Kafka 토픽·저장소·경보 전달을 분리한다. 차량 
 - 새 consumer group의 retained log 재생은 기존 경보를 다시 만들 수 있으므로 replay 중 경보를 격리한다.
 - ClickHouse 재구성은 Kafka/원본의 보존 범위 내에서만 가능하다. 보존 정책에 따라 삭제한 비선택 이력은 복구 대상으로 보장하지 않는다.
 
+원본 업로드의 전환 게이트는 별도로 적용한다.
+
+1. 서버 발행 클립 참조를 센서 SeqWindow 접근 전에 통과시키는 Flink 버전을 배포한다.
+2. PostgreSQL migration·백업·접근 권한, MQTT 클립 토픽 ACL·서비스별 인증서와 객체 HTTPS, multipart 정리를 준비한다.
+3. 기존 SegmentUpload 신규 생성을 중단하고 진행 중 multipart와 차량 WAL의 `segment-ref`를 drain·대사한다.
+4. SegmentUpload가 제거된 버전을 제한된 차량에 적용하고 MQTT 업로드 제어·서버 재시작·Kafka 실패·응답 유실·취소 복구를 확인한다.
+
+차량 CLI는 `--legacy-wal`(기본 `./wal-segments`)의 미확인 기존 업로드를 검사하고 남아 있으면
+새 원본 경로 시작을 거절한다. 기존 배포 버전으로 drain한 뒤 같은 경로를 다시 확인한다.
+
+롤백 중에도 새 PostgreSQL 작업·outbox와 차량 raw manifest·pin을 보존한다. 같은 원본을 새 MQTT 제어와
+기존 업로드 경로에 동시에 제출하면 서로 다른 참조가 생길 수 있으므로 차량별 활성 경로를 하나로 정한다.
+공유 DB migration을 되돌리거나 선택 파일을 지우는 방식으로 롤백하지 않는다.
+
 전환 중 지켜야 할 데이터·상태 조건은 [MQTT 수집 계약 §4](mqtt-contract.md)를 따른다.
 배포된 환경은 이번 로컬 리팩토링에서 변경하지 않았다.
 
@@ -760,6 +877,8 @@ shadow 실험은 Kafka 토픽·저장소·경보 전달을 분리한다. 차량 
 | 구간 | 지표 | 확인할 실패 |
 |---|---|---|
 | 차량 | ring/outbox 사용량, 가장 오래된 미확인 데이터, 기록 실패 | 용량 포화·저장 실패·장기 단절 |
+| 원본 차량 | spool/pin 바이트, 요청 coverage·missing, 업로드 대기 시간 | 선택 원본 포화·구간 누락·전송 정체 |
+| 원본 서버 | 상태별 작업 수, lease 지연, 검증 시간, 참조 outbox 지연, 고아 multipart | DB·S3 경계 실패·검증 실패·Kafka 실패 |
 | MQTT | 연결/재접속 수, 세션·큐 사용량, 인증/ACL 거절 | 동시 재접속·큐 상한·신원 오류 |
 | bridge | in-flight 배치, application ACK 지연, Kafka callback 실패 | 적재 지연·부분 성공·재전송 증가 |
 | 명령 | desired/reported 차이, 적용 지연, 만료·거절 | 적용 미확인·정책 충돌 |
@@ -770,23 +889,78 @@ DLQ는 격리된 실패 데이터이지 그 자체로 유실 확정이 아니다
 
 ### 6.3 테스트 전략과 현재 결과
 
-2026-10-26 로컬 리팩토링 회귀 결과다. 대규모 부하나 클라우드 HA 결과가 아니다.
+2026-11-07 MQTT 클립 제어 전환을 TDD로 검증했다. 차량 transport와 서버 handler의 테스트를
+먼저 추가해 미구현 실패를 확인한 뒤 구현했다. 실제 브로커 테스트에서 드러난 64 KiB 초과
+제어 메시지 누락과, MQTT를 비활성화한 gRPC 테스트의 불필요한 인증서 의존성을 수정했다.
+
+| 대상 | 실행 결과 | 확인 범위 |
+|---|---|---|
+| Python 전체 | 269 passed, 7 skipped | 기존 수집·WAL, MQTT 제어·HTTPS PUT, 원본 보존·재시도. skip 7건은 아래 통합 게이트 |
+| Python MQTT 통합 | 7 passed | 실제 브로커의 큰 메타데이터, 응답 유실·지연, ACL, Kafka·ClickHouse 및 참조 중복 조회 |
+| 게이트웨이 | 단위 52 + 통합 22 passed | 실제 MQTT·PostgreSQL·MinIO·Kafka 클립 14건과 기존 gRPC 8건 |
+| Flink | 50 passed | 참조 식별·중복 제거·변환·경보 회귀 |
+
+게이트웨이 클립 통합은 서비스별 인증서를 가진 두 서버를 사용한다. 생성 응답 유실·서버 재시작,
+메타데이터 충돌, multipart 세대 만료, 완료·취소 경합, 체크섬 불일치, Kafka ACK 뒤 DB 기록 유실을
+검증한다. 차량의 HTTPS 테스트는 MQTT 제어 응답을 기다려도 신호 루프가 진행되고 저장소로 차량
+인증서를 보내지 않는지 확인한다. 실제 무선망·클라우드 HA나 Kubernetes 배포 검증은 포함하지 않는다.
+
+**2026-11-07 재검토 — 유실·중복·재시작 경계:** `cartesian-doubt` 방식으로 저장 경계의
+가정을 추가 검증했다. 테스트 7건을 추가했으며, 아래 범위에서 새로운 실행 코드 결함은 재현되지 않았다.
+
+| 구분 | 확인한 내용 | 근거와 한계 |
+|---|---|---|
+| 검증됨 | PUT 응답 유실 또는 ETag 로컬 저장 실패 후에도 같은 파일·part를 재전송 | `test_clip_crash_boundaries.py`에서 실제 SQLite와 원본 spool을 닫고 다시 열어 검증. 원격 전송은 장애 주입용 대역 |
+| 검증됨 | 완료 접수 응답 유실 후 상태 조회로 복구 | 동일 작업 ID와 불변 manifest 유지, 원본 pin 유지 |
+| 검증됨 | 완료 receipt·pin 해제·업로더 상태가 함께 커밋되거나 함께 롤백 | SQLite trigger로 마지막 상태 갱신을 실패시켜 확인. 커밋 후 재시작에서는 재전송 없이 완료 유지 |
+| 검증됨 | MQTT 브로커 재시작 후 서버가 자동 재연결·재구독하고 기존 작업을 완료 | 실제 Mosquitto·PostgreSQL·MinIO·Kafka 사용. 브로커 접속 주소는 유지 |
+| 검증됨 | Kafka ACK 뒤 DB 기록 유실 시 같은 참조가 중복 발행됨 | 기존 `ClipUploadIT`가 동일 payload·식별자의 두 Kafka 레코드를 확인. 전송 자체의 exactly-once는 보장하지 않음 |
+| 검증됨 | 재발행된 참조가 관제 조회에서는 한 건으로 합쳐짐 | 실제 ClickHouse에서 저장소의 `segments_raw` DDL과 `segments` FINAL 뷰 실행. 다른 클립은 별도 유지. 전체 Flink 연결 E2E 시험은 아님 |
+| 전제 | 차량 spool·SQLite와 서버 PostgreSQL·객체가 유지되고 서비스가 다시 연결됨 | 디스크/PVC 유실이나 과거 시점 백업 복원까지 같은 복구 보장으로 확대하지 않음 |
+| 미검증 | 운영 HA, 전원 차단·디스크 고장, 실제 이동통신, Kubernetes 인증서 배포 | 기존 운영 검증 과제로 유지 |
+
+재검토 실행 결과는 **Python 관련 77건, 게이트웨이 클립 통합 14건, MQTT·ClickHouse 통합 2건 통과**다.
+추가한 차량 장애 경계 테스트를 `make mqtt-test`에도 포함했다. 여기서 재시작은 차량 DB 재개·서버
+애플리케이션 재기동·실제 브로커 재시작을 시험한 것이며, 장치 전원 차단 시 저장장치의 fsync 이행까지
+실증한 것은 아니다.
+
+`COMPLETED` 이후에도 Flink 처리가 Kafka retention보다 오래 지연되면 카탈로그에 참조가 누락될 수 있다.
+완료된 PostgreSQL outbox는 남지만 `COMPLETED` 작업을 카탈로그와 대사해 자동 재발행하는 경로는 없다.
+또한 관제 요청의 접수 성공은 요청 구간 전체 확보를 뜻하지 않는다. 만료된 명령은 실행하지 않으며,
+녹화 공백·보존 기간을 지난 구간은 `missing`/`partial`로 확인해야 한다.
+
+실행 명령:
+
+```sh
+PYTHONPATH=exploration exploration/.venv/bin/python -m pytest exploration/tests -q
+RUN_MQTT_INTEGRATION=1 PYTHONPATH=exploration exploration/.venv/bin/python -m pytest exploration/tests/test_mqtt_integration.py exploration/tests/test_clip_mqtt_integration.py -q
+./gradlew :gateway:check :flink-pipeline:test --console=plain
+```
+
+#### 이전 검증 기록
+
+2026-10-27 당시 REST 기반 원본 업로드의 로컬 회귀 검증 결과다. 현재 MQTT 제어 전환 검증과 구분한다.
 
 | 대상 | 검증 내용 | 결과 |
 |---|---|---|
-| Python | 기존 WAL·gRPC·원본 업로드 회귀 + MQTT 정책·보존·ACK·명령 | 통합 테스트 포함 139건 통과 |
-| MQTT/Kafka/ClickHouse | 실제 mTLS 브로커 ACL·재시작, ACK 유실/재전송, Kafka 적재, 최신 위치 SQL | 위 Python 테스트 중 3건. 격리 컨테이너 |
-| Flink | dedup·변환·기존 경보 + MQTT stream 식별·history 제외·watchdog | 38건 통과 |
-| gRPC 게이트웨이 | 기존 수집·신원·ACK·업로드 제어 | 단위 22건 + 통합 8건 통과 |
-| API | 응답·알림·발생 시각 기준 위치 조회 계약 | 10건 통과 |
-| 프론트엔드 | 기존 대시보드 회귀 | 32건 및 typecheck 통과 |
+| Python | MQTT 정책·ACK·명령, 원본 회전·pin·크래시 복구, HTTPS 전송·재개 | 실제 MQTT 통합 4건을 포함해 225건 통과 |
+| Flink | dedup·변환·경보, 서버 클립 참조와 센서 시퀀스 분리 | 50건 통과 |
+| 게이트웨이 | REST 멱등성·인증·lease·multipart 복구·outbox, 기존 gRPC 수집 | 단위 51건 + 통합 20건 통과 |
+| API | 응답·알림·발생 시각 기준 위치 조회 계약 | 단위 44건 + 통합 4건 통과 |
+
+Java 전체 169건이 클린 빌드에서 통과했다. 게이트웨이 통합 테스트 중 12건은 실제 PostgreSQL·MinIO·Kafka를
+사용하며, 2-part 업로드와 multipart 만료 후 재개, 두 인스턴스의 작업 경합을 포함한다.
+Compose·Kustomize 구성과 로컬 HTTPS 프록시 설정도 검증했다. 클라우드 HA와 차량 규모별 부하는 후속 검증 대상이다.
 
 재현: `make mqtt-test`, `make mqtt-integration-test`, `make gateway-test`, `make flink-test`.
 Python 전체는 exploration에서 `RUN_MQTT_INTEGRATION=1 PYTHONPATH=. .venv/bin/python -m pytest -q`로 실행한다.
 Java 전체 빌드·검증은 루트에서 `./gradlew clean build`로 실행한다. 게이트웨이의 `*IT` 통합 테스트도 포함한다.
 API·게이트웨이는 JDK 21, Flink는 배포 이미지와 같은 JDK 17을 Gradle toolchain으로 사용한다.
-프론트엔드는 `npm test`와 `npm run typecheck`를 사용한다.
 데이터셋·좌표 검증은 [데이터 설계](data-design.md)를 참고한다. 과거 gRPC WAL 벤치마크 문서는 Git 이력에 남아 있다.
+
+회귀 테스트는 멱등 생성, 메타데이터 충돌, 완료 응답·ACK 기록 유실, 체크섬 불일치, 취소 경합과
+참조 재발행을 확인한다. 차량에서는 시간·용량 회전, 사건 후 구간 선택, 부분 coverage, 용량 포화,
+지연된 사건의 발생 시각 기준 선택과 재시작 후 재전송을 확인한다.
 
 ### 6.4 육안 확인을 최소화한다
 
@@ -803,7 +977,7 @@ API·게이트웨이는 JDK 21, Flink는 배포 이미지와 같은 JDK 17을 Gr
 1,000~10,000 연결, 무선망 단절·동시 재접속, 집중 관찰 비율 증가, 장기 backlog 처리,
 실차의 전력·디스크 내구성, 클라우드 요금과 broker HA는 아직 검증하지 않았다.
 Flink operator harness와 MQTT→Kafka 통합 테스트를 전체 운영 파이프라인의 복구·탐지 지연 검증으로 대신하지 않는다.
-기존 savepoint 이전, 실제 센서 어댑터, 원본 자동 보존·삭제도 운영 전 확인 대상이다.
+기존 savepoint 이전, 실제 센서 어댑터, 실제 장치에서의 원본 보존·삭제와 디스크 고장 복구도 운영 전 확인 대상이다.
 
 ## 부록. 용어
 

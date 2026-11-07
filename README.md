@@ -39,20 +39,26 @@ Qualcomm 기업 연계 캡스톤 [AutoNotify](https://github.com/Qualcomm-Capsto
 
 ## 시스템 아키텍처
 
-현재 설계는 **선택적 수집 → SQLite outbox → MQTT → bridge → Kafka**이며 기존 gRPC 경로도 유지합니다.
-하행 정책 명령과 적용 결과는 MQTT로 주고받습니다. 로컬 구현 단계이며 클라우드 HA·대규모 접속은 검증 전입니다.
+신호 경로는 **선택적 수집 → SQLite outbox → MQTT → bridge → Kafka**이며 기존 gRPC Ingest도 유지합니다.
+하행 정책·클립 요청과 적용 결과는 MQTT로 주고받습니다. 원본 파일은 차량에서 사건·요청 구간을
+선택한 뒤 MQTT 제어와 presigned HTTPS로 업로드합니다. 로컬 구현 단계이며 클라우드 HA·대규모 접속은 검증 전입니다.
 [현재 SDD](docs/sdd.md)에서 구성도와 계층별 책임을 확인할 수 있습니다.
 
 신호와 객체 메타데이터는 Kafka를 거쳐 처리하고, 원본 센서 파일은 오브젝트 스토리지에
 저장합니다. Kafka에는 원본 파일의 참조만 기록하고, ClickHouse의 클립 카탈로그에서 두 경로를
 연결합니다.
 
+원본 업로드 서버는 공유 PostgreSQL에 작업과 참조 outbox를 보존합니다. 객체 크기·SHA-256 검증과
+참조의 Kafka ACK가 영속 기록된 `COMPLETED` 결과를 차량이 저장한 뒤 원본 파일의 pin을 해제합니다.
+원본 트리거는 차량의 이상 입력과 운영자 CLI이며, 실차 센서 드라이버와 Flink 경보의 자동 원본 요청은 후속 범위입니다.
+
 ## 핵심 설계 결정
 
 | 문제 | 해결 |
 |---|---|
 | 대역폭 58배 차이 | **Claim-Check** — 참조만 버스로, 원본은 스토리지로 |
-| 원본 연속 업로드의 비용 | **사건·요청 구간만 업로드** — 파일 업로드는 구현, 실차 트리거·보존 자동화는 미완료 |
+| 원본 연속 업로드의 비용 | **사건·요청 구간 선택** — 기본 사건 전 10초·후 20초, 비선택 원본 1시간·128 GiB |
+| 원본 업로드 중 장애 | **MQTT 업로드 작업 + 공유 PostgreSQL outbox** — 객체 검증·참조 Kafka ACK 후 차량 pin 해제 |
 | 평시 전량 전송의 처리·저장 비용 | **상황·센서별 선택적 전송 + 크기 제한 배칭** ([전환 근거](docs/mqtt-migration.md)) |
 | 메시지 전송 중단 후 복구 | **MQTT + SQLite outbox + application ACK**, 기존 gRPC WAL/CACK 유지 |
 | 센서 주기가 채널마다 수백 배 다름 | **타임스탬프 3종** + 키프레임 동기화 앵커 |
@@ -70,6 +76,7 @@ Qualcomm 기업 연계 캡스톤 [AutoNotify](https://github.com/Qualcomm-Capsto
 | 수집·버퍼링 | Apache Kafka | 차량 레코드를 받아 처리와 저장으로 분기하고, 장애 시 재처리할 수 있게 보관 |
 | 스트림 처리 | Apache Flink | 차량별 상태를 유지하면서 중복 제거, 검증, 좌표 변환, ODD 이탈 감지 |
 | 원본 저장 | 오브젝트 스토리지 + MCAP | 용량이 큰 센서 클립을 파일로 저장하고 API에서 다시 재생 |
+| 원본 업로드 제어 | MQTT · PostgreSQL · JPA · Flyway | MQTT mTLS·토픽 ACL, 영속 작업·참조 outbox·완료 상태 관리 |
 | 시계열 저장 | ClickHouse | 신호·객체 메타데이터와 클립 카탈로그를 저장하고 조회 |
 | API | Spring Boot | ClickHouse 조회와 Kafka 알림을 REST·SSE로 제공 |
 | 관제 화면 | React · MapLibre GL · uPlot · Rerun | 차량 위치, 신호, 알림, 센서 클립을 한 화면에서 확인 |
@@ -86,6 +93,7 @@ Qualcomm 기업 연계 캡스톤 [AutoNotify](https://github.com/Qualcomm-Capsto
 - **대시보드는 기본 실행에서 목업 스트림을 씁니다.** `make dashboard`는 실 API에 연결되지만 Kafka→Flink→API 종단 지연과 복구는 아직 측정하지 않았습니다.
 - **원천이 차량 2대이고 연속 구간이 20초입니다.** "N대"는 동시 스트림 N개이며 실차량 N대가 아닙니다.
 - **클라우드 HA는 미검증입니다.** 기존 Kafka 검증은 단일 호스트의 broker-level failover이며 MQTT는 로컬 단일 브로커입니다. 호스트·존 장애와 대규모 재접속 검증은 남아 있습니다.
+- **원본 보존은 장치 용량에 제한됩니다.** 선택된 미확인 파일은 자동 만료하지 않으며, spool이 가득 차면 새 원본 수용을 중단합니다. 1시간·128 GiB는 원천 발생량에 따른 프로젝트 기본값입니다.
 - **3D 박스는 nuScenes 주석입니다.** 대시보드가 재생하는 객체 위치는 차량에서 계산한 값이 아니며 관제 화면의 주변 상황 표시에만 사용합니다.
 - **레이더 페이로드 미해석** — `.pcd`를 MCAP에 싣기만 하고 파싱·시각화는 미구현입니다.
 
@@ -94,9 +102,10 @@ Qualcomm 기업 연계 캡스톤 [AutoNotify](https://github.com/Qualcomm-Capsto
 ```
 FleetSentinel/
 ├── frontend/         # (React) 관제 대시보드 — 지도·시계열·클립 검색·센서 재생
-├── exploration/      # (Python) 데이터 측정·검증 도구 + 차량 측 유실 방지 구현(WAL·ack·dedup)
+├── exploration/      # (Python) 수집·MQTT·원본 기록/보존·MQTT 업로드 제어 + 데이터 도구
+├── gateway/          # (Java) MQTT 원본 업로드 제어·PostgreSQL outbox·기존 gRPC 수집
 ├── flink-pipeline/   # (Java) dedup·검증·좌표 파생·ODD 이탈 판정
-├── infra/            # docker-compose (Kafka ×3 · Flink · ClickHouse · MinIO)
+├── infra/            # docker-compose (Kafka ×3 · Flink · ClickHouse · PostgreSQL · MinIO)
 ├── schemas/          # Avro 스키마
 ├── scripts/          # 인프라 스모크 · Kafka HA 데모
 └── docs/             # 설계 문서
@@ -116,6 +125,12 @@ API·게이트웨이는 Java 21, Flink는 Java 17을 사용하며 산출물은 �
 게이트웨이의 기본 스토리지 인증은 AWS 자격증명 체인(IAM 역할 포함)을 사용합니다.
 로컬 MinIO는 `--spring.profiles.active=local`로 선택하며 `make gateway`에 반영되어 있습니다.
 정적 키를 직접 설정할 때는 `fleetsentinel.object-store.credentials-mode=static`을 명시합니다.
+
+MQTT 원본 업로드 제어는 공유 PostgreSQL과 MQTT mTLS를 사용하며 관리 포트는 8082입니다.
+스키마는 Flyway로 적용합니다. 객체 전송도 HTTPS를 사용하고 차량 인증서는 MQTT 브로커에 제시합니다. 클립 REST 엔드포인트는 제거했습니다.
+원본은 기본 10초·256 MiB로 회전하고, 선택 파일을 16 MiB part·4 MiB/s·worker 1개로 전송합니다.
+기존 SegmentUpload는 진행 중 업로드·참조 drain을 확인한 뒤 비활성화합니다.
+전환·롤백과 multipart 정리 조건은 [SDD](docs/sdd.md)에 정리했습니다.
 
 `make mqtt-test`로 수집 정책·보존·ACK·명령 단위 테스트를,
 `make mqtt-integration-test`로 실제 MQTT·Kafka·ClickHouse 연동을 검증합니다.
