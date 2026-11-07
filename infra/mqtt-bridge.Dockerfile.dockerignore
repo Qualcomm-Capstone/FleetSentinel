@@ -1,0 +1,11 @@
+**
+!infra/
+!infra/mqtt-bridge.Dockerfile
+!infra/mqtt-bridge.requirements.txt
+!schemas/
+!schemas/*.avsc
+!exploration/
+!exploration/fleetsentinel_ingest/
+!exploration/fleetsentinel_ingest/*.py
+!exploration/scripts/
+!exploration/scripts/mqtt_ingest.py
