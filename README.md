@@ -111,35 +111,7 @@ FleetSentinel/
 └── docs/             # 설계 문서
 ```
 
-## 검증
-
-JDK 21·17과 Docker를 준비한 뒤 루트에서 `./gradlew clean build`를 실행하면 Java 세 모듈의
-단위 테스트, 게이트웨이·ClickHouse 통합 테스트, JAR 빌드를 수행합니다. Gradle은 Wrapper에 고정되어 있습니다.
-API·게이트웨이는 Java 21, Flink는 Java 17을 사용하며 산출물은 각 모듈의 `build/libs/`에 생성됩니다.
-
-`./gradlew :api:integrationTest`는 Testcontainers로 일회용 ClickHouse를 준비하고 스키마를 적용한 뒤 검증합니다.
-외부 일회용 DB를 사용할 때만 `-PclickhouseTestUrl=jdbc:ch://localhost:8123/fleet`를 지정하고
-`infra/clickhouse/001-schema.sql`을 미리 적용합니다. 운영·개발용 공유 DB는 지정하지 않습니다.
-빠른 단위 검증은 `./gradlew :api:test :gateway:test :flink-pipeline:test`로 실행합니다.
-
-게이트웨이의 기본 스토리지 인증은 AWS 자격증명 체인(IAM 역할 포함)을 사용합니다.
-로컬 MinIO는 `--spring.profiles.active=local`로 선택하며 `make gateway`에 반영되어 있습니다.
-정적 키를 직접 설정할 때는 `fleetsentinel.object-store.credentials-mode=static`을 명시합니다.
-
-MQTT 원본 업로드 제어는 공유 PostgreSQL과 MQTT mTLS를 사용하며 관리 포트는 8082입니다.
-스키마는 Flyway로 적용합니다. 객체 전송도 HTTPS를 사용하고 차량 인증서는 MQTT 브로커에 제시합니다. 클립 REST 엔드포인트는 제거했습니다.
-원본은 기본 10초·256 MiB로 회전하고, 선택 파일을 16 MiB part·4 MiB/s·worker 1개로 전송합니다.
-기존 SegmentUpload는 진행 중 업로드·참조 drain을 확인한 뒤 비활성화합니다.
-전환·롤백과 multipart 정리 조건은 [SDD](docs/sdd.md)에 정리했습니다.
-
-`make mqtt-test`로 수집 정책·보존·ACK·명령 단위 테스트를,
-`make mqtt-integration-test`로 실제 MQTT·Kafka·ClickHouse 연동을 검증합니다.
-Flink 회귀 테스트는 `make flink-test`를 사용합니다.
-
-Python 의존성과 설치 제약은 [exploration](exploration/README.md)에 정리했습니다.
-전체 검증 범위와 한계는 [SDD §6](docs/sdd.md)을 참고하세요.
-
-### 설계 문서
+## 설계 문서
 
 | 문서 | 무엇이 있는가 |
 |---|---|
@@ -147,6 +119,7 @@ Python 의존성과 설치 제약은 [exploration](exploration/README.md)에 정
 | [`docs/mqtt-migration.md`](docs/mqtt-migration.md) | 기존 설계와의 차이 → MQTT 선택 근거 → 운영 책임과 트레이드오프 |
 | [`docs/mqtt-contract.md`](docs/mqtt-contract.md) | 수집 정책·ACK·명령 계약과 전환 시 보존 조건 |
 | [`docs/data-design.md`](docs/data-design.md) | 실측 수치·필드 계약·시간/좌표 계약 |
+| [`k8s/README.md`](k8s/README.md) | 로컬 Kubernetes 배포와 인증서·접속 설정 |
 
 ## 라이선스
 

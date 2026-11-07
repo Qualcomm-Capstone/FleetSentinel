@@ -903,7 +903,8 @@ DLQ는 격리된 실패 데이터이지 그 자체로 유실 확정이 아니다
 게이트웨이 클립 통합은 서비스별 인증서를 가진 두 서버를 사용한다. 생성 응답 유실·서버 재시작,
 메타데이터 충돌, multipart 세대 만료, 완료·취소 경합, 체크섬 불일치, Kafka ACK 뒤 DB 기록 유실을
 검증한다. 차량의 HTTPS 테스트는 MQTT 제어 응답을 기다려도 신호 루프가 진행되고 저장소로 차량
-인증서를 보내지 않는지 확인한다. 실제 무선망·클라우드 HA나 Kubernetes 배포 검증은 포함하지 않는다.
+인증서를 보내지 않는지 확인한다. 이 회귀 테스트에는 실제 무선망·클라우드 HA나 Kubernetes
+배포 검증은 포함하지 않는다. 로컬 Kubernetes 검증 결과는 아래 별도로 기록한다.
 
 **2026-11-07 재검토 — 유실·중복·재시작 경계:** `cartesian-doubt` 방식으로 저장 경계의
 가정을 추가 검증했다. 테스트 7건을 추가했으며, 아래 범위에서 새로운 실행 코드 결함은 재현되지 않았다.
@@ -917,7 +918,7 @@ DLQ는 격리된 실패 데이터이지 그 자체로 유실 확정이 아니다
 | 검증됨 | Kafka ACK 뒤 DB 기록 유실 시 같은 참조가 중복 발행됨 | 기존 `ClipUploadIT`가 동일 payload·식별자의 두 Kafka 레코드를 확인. 전송 자체의 exactly-once는 보장하지 않음 |
 | 검증됨 | 재발행된 참조가 관제 조회에서는 한 건으로 합쳐짐 | 실제 ClickHouse에서 저장소의 `segments_raw` DDL과 `segments` FINAL 뷰 실행. 다른 클립은 별도 유지. 전체 Flink 연결 E2E 시험은 아님 |
 | 전제 | 차량 spool·SQLite와 서버 PostgreSQL·객체가 유지되고 서비스가 다시 연결됨 | 디스크/PVC 유실이나 과거 시점 백업 복원까지 같은 복구 보장으로 확대하지 않음 |
-| 미검증 | 운영 HA, 전원 차단·디스크 고장, 실제 이동통신, Kubernetes 인증서 배포 | 기존 운영 검증 과제로 유지 |
+| 미검증 | 운영 HA, 전원 차단·디스크 고장, 실제 이동통신, 운영 Kubernetes 인증서 갱신 | 기존 운영 검증 과제로 유지 |
 
 재검토 실행 결과는 **Python 관련 77건, 게이트웨이 클립 통합 14건, MQTT·ClickHouse 통합 2건 통과**다.
 추가한 차량 장애 경계 테스트를 `make mqtt-test`에도 포함했다. 여기서 재시작은 차량 DB 재개·서버
@@ -936,6 +937,21 @@ PYTHONPATH=exploration exploration/.venv/bin/python -m pytest exploration/tests 
 RUN_MQTT_INTEGRATION=1 PYTHONPATH=exploration exploration/.venv/bin/python -m pytest exploration/tests/test_mqtt_integration.py exploration/tests/test_clip_mqtt_integration.py -q
 ./gradlew :gateway:check :flink-pipeline:test --console=plain
 ```
+
+#### 로컬 Kubernetes 검증
+
+2026-11-07 전용 kind 클러스터에서 MQTT mTLS·bridge·게이트웨이 2개·PostgreSQL·Kafka·MinIO와
+HTTPS 업로드 proxy를 배포했다. 서버별 MQTT 인증서를 분리하고, 작업 DB와 브로커 상태 및 원본을
+PVC에 보관한다. 배포 스크립트는 전용 kubeconfig를 사용해 기존 클라우드 context를 변경하지 않는다.
+
+매니페스트 계약 테스트 **4건**, API 서버 dry-run, 정상 업로드와 재시작 복구 시험이 통과했다.
+실제 MQTT 관제 명령으로 선택한 **17,826,126바이트** MCAP를 두 조각으로 업로드하고, MinIO 재조회
+SHA-256·Kafka Avro 참조·MQTT 완료 receipt·차량 SQLite 재개 상태를 대조했다. 복구 시험에서는
+첫 조각 ETag 저장 후 전송을 멈추고 브로커와 두 서버가 모두 재기동한 다음, 같은 작업 ID로 완료했다.
+
+이 구성은 로컬 Kafka RF=1이며 Flink·ClickHouse를 실행하지 않는다. 운영 HA, PVC 유실, 인증서
+자동 갱신, 실제 이동통신은 별도 검증 대상이다. 실행 절차와 범위는
+[로컬 Kubernetes 가이드](../k8s/README.md)에 기록했다.
 
 #### 이전 검증 기록
 
