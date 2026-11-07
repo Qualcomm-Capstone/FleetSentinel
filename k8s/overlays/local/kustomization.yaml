@@ -1,18 +1,10 @@
-# kind / minikube 용. 리소스를 줄이고 게이트웨이를 1대로 내린다.
+# kind / minikube 용. 저장소 크기를 줄이고 인증서별 게이트웨이는 각각 1대를 유지한다.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: fleetsentinel
 resources:
   - ../../base
 patches:
-  # 로컬에서 게이트웨이 2대는 과하다. stateless 라 1대여도 동작은 같다.
-  - target:
-      kind: Deployment
-      name: gateway
-    patch: |-
-      - op: replace
-        path: /spec/replicas
-        value: 1
   # PVC 축소. 로컬 디스크가 원시 클립 50 GiB 를 감당하지 못한다.
   - target:
       kind: StatefulSet

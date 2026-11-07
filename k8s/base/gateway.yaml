@@ -1,5 +1,4 @@
-# 수집 게이트웨이. **stateless 라 Deployment 다** — 차량별 진행 커서를 갖지 않으므로
-# 어느 인스턴스에 붙어도 동작이 같고 확장이 레플리카 추가로 끝난다(SDD S-9).
+# 수집 게이트웨이. 클립 작업 상태는 공유 PostgreSQL에 보관한다.
 apiVersion: v1
 kind: Service
 metadata:
@@ -9,6 +8,8 @@ spec:
   selector:
     app: gateway
   ports:
+    - name: https
+      port: 8443
     - name: grpc
       port: 9090
     - name: mgmt
@@ -20,25 +21,56 @@ metadata:
   name: gateway
   namespace: fleetsentinel
 spec:
-  replicas: 2
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: gateway
+      instance: primary
   template:
     metadata:
       labels:
         app: gateway
+        instance: primary
     spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
       containers:
         - name: gateway
-          # 이미지는 별도 빌드가 필요하다 — 이 저장소에 Dockerfile 이 아직 없다.
           image: fleetsentinel/gateway:0.1.0
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {memory: 768Mi}
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: mgmt}
+            failureThreshold: 60
+            periodSeconds: 5
           ports:
+            - name: https
+              containerPort: 8443
             - name: grpc
               containerPort: 9090
             - name: mgmt
               containerPort: 8082
           env:
+            - name: CLIP_MQTT_URI
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: CLIP_MQTT_URI}
+            - name: CLIP_MQTT_CLIENT_ID
+              value: clip-service
+            - name: MQTT_PKI
+              value: /mqtt-pki
+            - name: CLIP_DB_URL
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: CLIP_DB_URL}
+            - name: CLIP_DB_USERNAME
+              valueFrom:
+                secretKeyRef: {name: fleet-secrets, key: CLIP_DB_USERNAME}
+            - name: CLIP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: fleet-secrets, key: CLIP_DB_PASSWORD}
             # 이 매니페스트는 함께 배포하는 MinIO를 사용한다.
             - name: OBJECT_STORE_CREDENTIALS_MODE
               value: static
@@ -50,6 +82,9 @@ spec:
             - name: MINIO_ENDPOINT
               valueFrom:
                 configMapKeyRef: {name: fleet-config, key: MINIO_ENDPOINT}
+            - name: OBJECT_STORE_PRESIGN_ENDPOINT
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: OBJECT_STORE_PRESIGN_ENDPOINT}
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: {name: fleet-secrets, key: MINIO_ACCESS_KEY}
@@ -60,21 +95,142 @@ spec:
             - name: FLEETSENTINEL_PKI
               value: /pki
           volumeMounts:
+            - name: mqtt-pki
+              mountPath: /mqtt-pki
+              readOnly: true
             - name: pki
               mountPath: /pki
               readOnly: true
           readinessProbe:
             httpGet:
-              path: /actuator/health
+              path: /actuator/health/readiness
               port: mgmt
             initialDelaySeconds: 20
           livenessProbe:
             httpGet:
-              path: /actuator/health
+              path: /actuator/health/liveness
               port: mgmt
             initialDelaySeconds: 60
             periodSeconds: 30
       volumes:
+        - name: mqtt-pki
+          secret:
+            secretName: clip-service-pki
+            defaultMode: 288
+        - name: pki
+          secret:
+            secretName: gateway-pki
+            # Secret 키 이름을 게이트웨이가 기대하는 경로 구조로 편다.
+            items:
+              - key: ca.crt
+                path: ca/ca.crt
+              - key: server.crt
+                path: server/server.crt
+              - key: server.key
+                path: server/server.key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-secondary
+  namespace: fleetsentinel
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gateway
+      instance: secondary
+  template:
+    metadata:
+      labels:
+        app: gateway
+        instance: secondary
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+      containers:
+        - name: gateway
+          image: fleetsentinel/gateway:0.1.0
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {memory: 768Mi}
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: mgmt}
+            failureThreshold: 60
+            periodSeconds: 5
+          ports:
+            - name: https
+              containerPort: 8443
+            - name: grpc
+              containerPort: 9090
+            - name: mgmt
+              containerPort: 8082
+          env:
+            - name: CLIP_MQTT_URI
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: CLIP_MQTT_URI}
+            - name: CLIP_MQTT_CLIENT_ID
+              value: clip-service-2
+            - name: MQTT_PKI
+              value: /mqtt-pki
+            - name: CLIP_DB_URL
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: CLIP_DB_URL}
+            - name: CLIP_DB_USERNAME
+              valueFrom:
+                secretKeyRef: {name: fleet-secrets, key: CLIP_DB_USERNAME}
+            - name: CLIP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: fleet-secrets, key: CLIP_DB_PASSWORD}
+            # 이 매니페스트는 함께 배포하는 MinIO를 사용한다.
+            - name: OBJECT_STORE_CREDENTIALS_MODE
+              value: static
+            - name: OBJECT_STORE_PATH_STYLE_ACCESS
+              value: "true"
+            - name: KAFKA_BOOTSTRAP
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: KAFKA_BOOTSTRAP}
+            - name: MINIO_ENDPOINT
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: MINIO_ENDPOINT}
+            - name: OBJECT_STORE_PRESIGN_ENDPOINT
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: OBJECT_STORE_PRESIGN_ENDPOINT}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: {name: fleet-secrets, key: MINIO_ACCESS_KEY}
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef: {name: fleet-secrets, key: MINIO_SECRET_KEY}
+            # mTLS 인증서 경로. Secret 을 여기에 마운트한다.
+            - name: FLEETSENTINEL_PKI
+              value: /pki
+          volumeMounts:
+            - name: mqtt-pki
+              mountPath: /mqtt-pki
+              readOnly: true
+            - name: pki
+              mountPath: /pki
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: mgmt
+            initialDelaySeconds: 20
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: mgmt
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: mqtt-pki
+          secret:
+            secretName: clip-service-2-pki
+            defaultMode: 288
         - name: pki
           secret:
             secretName: gateway-pki

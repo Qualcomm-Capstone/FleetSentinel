@@ -10,6 +10,7 @@ metadata:
   namespace: fleetsentinel
 spec:
   clusterIP: None          # headless — Pod DNS(kafka-0.kafka)가 필요하다
+  publishNotReadyAddresses: true # KRaft quorum DNS must exist before broker readiness.
   selector:
     app: kafka
   ports:

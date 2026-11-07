@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mqtt-bridge
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: mqtt-bridge}
+  template:
+    metadata:
+      labels: {app: mqtt-bridge}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+      containers:
+        - name: bridge
+          image: fleetsentinel/mqtt-bridge:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: [bridge, --host, mqtt, --port, '8883', --client-id, bridge,
+                 --ca, /pki/ca.crt, --cert, /pki/bridge.crt, --key, /pki/bridge.key,
+                 --bootstrap, '$(KAFKA_BOOTSTRAP)']
+          env:
+            - name: KAFKA_BOOTSTRAP
+              valueFrom:
+                configMapKeyRef: {name: fleet-config, key: KAFKA_BOOTSTRAP}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: pki, mountPath: /pki, readOnly: true}
+      volumes:
+        - name: pki
+          secret: {secretName: mqtt-bridge-pki, defaultMode: 288}

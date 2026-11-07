@@ -33,6 +33,10 @@ spec:
           image: minio/minio:RELEASE.2025-04-08T15-41-24Z
           args: ["server", "/data", "--console-address", ":9001"]
           env:
+            - name: MINIO_API_STALE_UPLOADS_EXPIRY
+              value: 168h
+            - name: MINIO_API_STALE_UPLOADS_CLEANUP_INTERVAL
+              value: 1h
             - name: MINIO_ROOT_USER
               valueFrom:
                 secretKeyRef: {name: fleet-secrets, key: MINIO_ACCESS_KEY}

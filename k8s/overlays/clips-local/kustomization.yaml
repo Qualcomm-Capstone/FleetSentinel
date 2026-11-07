@@ -1,0 +1,87 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: fleetsentinel
+resources:
+  - ../local
+patches:
+  - target: {kind: ConfigMap, name: fleet-config}
+    patch: |-
+      - op: replace
+        path: /data/OBJECT_STORE_PRESIGN_ENDPOINT
+        value: https://localhost:30443
+      - op: replace
+        path: /data/KAFKA_BOOTSTRAP
+        value: kafka-0.kafka:9092
+  - target: {kind: Service, name: mqtt}
+    patch: |-
+      - op: add
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30883
+  - target: {kind: Service, name: minio-tls}
+    patch: |-
+      - op: add
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30443
+  - path: kafka.yaml
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: flink-config
+        namespace: fleetsentinel
+      $patch: delete
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: flink-jobmanager
+        namespace: fleetsentinel
+      $patch: delete
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: flink-jobmanager
+        namespace: fleetsentinel
+      $patch: delete
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: flink-taskmanager
+        namespace: fleetsentinel
+      $patch: delete
+  - patch: |-
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: flink-submit-pipelines
+        namespace: fleetsentinel
+      $patch: delete
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: clickhouse
+        namespace: fleetsentinel
+      $patch: delete
+  - patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: clickhouse
+        namespace: fleetsentinel
+      $patch: delete
+  - patch: |-
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: clickhouse-schema
+        namespace: fleetsentinel
+      $patch: delete

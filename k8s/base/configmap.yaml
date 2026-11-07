@@ -13,8 +13,12 @@ data:
   KAFKA_BOOTSTRAP: kafka-0.kafka:9092,kafka-1.kafka:9092,kafka-2.kafka:9092
   ODD_BOUNDS: singapore-onenorth=1.2980,1.2990,103.7882,103.7887;boston-seaport=42.3445,42.3518,-71.0507,-71.0341
   MINIO_ENDPOINT: http://minio:9000
+  # 배포 시 차량이 접근할 수 있는 HTTPS S3 주소로 교체한다.
+  OBJECT_STORE_PRESIGN_ENDPOINT: https://objects.fleetsentinel.invalid
   MINIO_BUCKET_RAW: fleet-raw
   CLICKHOUSE_URL: jdbc:ch://clickhouse:8123/fleet
+  CLIP_MQTT_URI: ssl://mqtt:8883
+  CLIP_DB_URL: jdbc:postgresql://postgres:5432/fleetsentinel
   # Flink 체크포인트. **버킷 루트를 쓰면 안 된다** — Flink 가
   # "Cannot use the root directory for checkpoints" 로 거절한다.
   FLINK_CHECKPOINT_DIR: s3://checkpoints/flink

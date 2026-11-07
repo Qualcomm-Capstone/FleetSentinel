@@ -9,4 +9,10 @@ resources:
   - minio.yaml
   - clickhouse.yaml
   - gateway.yaml
+  - postgres.yaml
   - flink.yaml
+  - mqtt.yaml
+  - minio-tls.yaml
+  - mqtt-bridge.yaml
+  - ../../infra/mqtt
+  - ../../infra
