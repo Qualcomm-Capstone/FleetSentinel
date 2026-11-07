@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cingest.proto\x12\x17\x66leetsentinel.ingest.v1\"_\n\x0cIngestRecord\x12\x0b\n\x03seq\x18\x01 \x01(\x04\x12\x31\n\x04kind\x18\x02 \x01(\x0e\x32#.fleetsentinel.ingest.v1.RecordKind\x12\x0f\n\x07payload\x18\x03 \x01(\x0c\"\x16\n\x03\x41\x63k\x12\x0f\n\x07\x61\x63k_seq\x18\x01 \x01(\x04\"\xb8\x01\n\x12\x42\x65ginUploadRequest\x12\x12\n\nt_start_us\x18\x01 \x01(\x03\x12\x10\n\x08t_end_us\x18\x02 \x01(\x03\x12\x12\n\nsize_bytes\x18\x03 \x01(\x04\x12\x0e\n\x06sha256\x18\x04 \x01(\t\x12\x17\n\x0fpart_size_bytes\x18\x05 \x01(\x04\x12\x10\n\x08scene_id\x18\x06 \x01(\t\x12\x17\n\x0fsensor_channels\x18\x07 \x03(\t\x12\x14\n\x0csample_count\x18\x08 \x01(\r\"\x9a\x01\n\x13\x42\x65ginUploadResponse\x12\x12\n\nsegment_id\x18\x01 \x01(\t\x12\x11\n\tupload_id\x18\x02 \x01(\t\x12\x10\n\x08\x62lob_uri\x18\x03 \x01(\t\x12\x33\n\tpart_urls\x18\x04 \x03(\x0b\x32 .fleetsentinel.ingest.v1.PartUrl\x12\x15\n\rexpires_at_us\x18\x05 \x01(\x03\"+\n\x07PartUrl\x12\x13\n\x0bpart_number\x18\x01 \x01(\r\x12\x0b\n\x03url\x18\x02 \x01(\t\"\x84\x01\n\x15\x43ompleteUploadRequest\x12\x12\n\nsegment_id\x18\x01 \x01(\t\x12\x11\n\tupload_id\x18\x02 \x01(\t\x12\x30\n\x05parts\x18\x03 \x03(\x0b\x32!.fleetsentinel.ingest.v1.PartEtag\x12\x12\n\nt_start_us\x18\x04 \x01(\x03\"-\n\x08PartEtag\x12\x13\n\x0bpart_number\x18\x01 \x01(\r\x12\x0c\n\x04\x65tag\x18\x02 \x01(\t\"P\n\x16\x43ompleteUploadResponse\x12\x10\n\x08\x62lob_uri\x18\x01 \x01(\t\x12\x12\n\nsize_bytes\x18\x02 \x01(\x04\x12\x10\n\x08verified\x18\x03 \x01(\x08\"e\n\x12RefreshUrlsRequest\x12\x12\n\nsegment_id\x18\x01 \x01(\t\x12\x11\n\tupload_id\x18\x02 \x01(\t\x12\x14\n\x0cpart_numbers\x18\x03 \x03(\r\x12\x12\n\nt_start_us\x18\x04 \x01(\x03\"O\n\x12\x41\x62ortUploadRequest\x12\x12\n\nsegment_id\x18\x01 \x01(\t\x12\x11\n\tupload_id\x18\x02 \x01(\t\x12\x12\n\nt_start_us\x18\x03 \x01(\x03\"&\n\x13\x41\x62ortUploadResponse\x12\x0f\n\x07\x61\x62orted\x18\x01 \x01(\x08*z\n\nRecordKind\x12\x1b\n\x17RECORD_KIND_UNSPECIFIED\x10\x00\x12\x16\n\x12RECORD_KIND_SIGNAL\x10\x01\x12\x1b\n\x17RECORD_KIND_SEGMENT_REF\x10\x02\x12\x1a\n\x16RECORD_KIND_PERCEPTION\x10\x03\x32[\n\x06Ingest\x12Q\n\x06Stream\x12%.fleetsentinel.ingest.v1.IngestRecord\x1a\x1c.fleetsentinel.ingest.v1.Ack(\x01\x30\x01\x32\xaa\x03\n\rSegmentUpload\x12\x62\n\x05\x42\x65gin\x12+.fleetsentinel.ingest.v1.BeginUploadRequest\x1a,.fleetsentinel.ingest.v1.BeginUploadResponse\x12k\n\x08\x43omplete\x12..fleetsentinel.ingest.v1.CompleteUploadRequest\x1a/.fleetsentinel.ingest.v1.CompleteUploadResponse\x12\x64\n\x07Refresh\x12+.fleetsentinel.ingest.v1.RefreshUrlsRequest\x1a,.fleetsentinel.ingest.v1.BeginUploadResponse\x12\x62\n\x05\x41\x62ort\x12+.fleetsentinel.ingest.v1.AbortUploadRequest\x1a,.fleetsentinel.ingest.v1.AbortUploadResponseB/\n\x1eio.fleetsentinel.gateway.protoB\x0bIngestProtoP\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cingest.proto\x12\x17\x66leetsentinel.ingest.v1\"_\n\x0cIngestRecord\x12\x0b\n\x03seq\x18\x01 \x01(\x04\x12\x31\n\x04kind\x18\x02 \x01(\x0e\x32#.fleetsentinel.ingest.v1.RecordKind\x12\x0f\n\x07payload\x18\x03 \x01(\x0c\"\x16\n\x03\x41\x63k\x12\x0f\n\x07\x61\x63k_seq\x18\x01 \x01(\x04*z\n\nRecordKind\x12\x1b\n\x17RECORD_KIND_UNSPECIFIED\x10\x00\x12\x16\n\x12RECORD_KIND_SIGNAL\x10\x01\x12\x1b\n\x17RECORD_KIND_SEGMENT_REF\x10\x02\x12\x1a\n\x16RECORD_KIND_PERCEPTION\x10\x03\x32[\n\x06Ingest\x12Q\n\x06Stream\x12%.fleetsentinel.ingest.v1.IngestRecord\x1a\x1c.fleetsentinel.ingest.v1.Ack(\x01\x30\x01\x42/\n\x1eio.fleetsentinel.gateway.protoB\x0bIngestProtoP\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,32 +32,12 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'ingest_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\036io.fleetsentinel.gateway.protoB\013IngestProtoP\001'
-  _globals['_RECORDKIND']._serialized_start=1039
-  _globals['_RECORDKIND']._serialized_end=1161
+  _globals['_RECORDKIND']._serialized_start=162
+  _globals['_RECORDKIND']._serialized_end=284
   _globals['_INGESTRECORD']._serialized_start=41
   _globals['_INGESTRECORD']._serialized_end=136
   _globals['_ACK']._serialized_start=138
   _globals['_ACK']._serialized_end=160
-  _globals['_BEGINUPLOADREQUEST']._serialized_start=163
-  _globals['_BEGINUPLOADREQUEST']._serialized_end=347
-  _globals['_BEGINUPLOADRESPONSE']._serialized_start=350
-  _globals['_BEGINUPLOADRESPONSE']._serialized_end=504
-  _globals['_PARTURL']._serialized_start=506
-  _globals['_PARTURL']._serialized_end=549
-  _globals['_COMPLETEUPLOADREQUEST']._serialized_start=552
-  _globals['_COMPLETEUPLOADREQUEST']._serialized_end=684
-  _globals['_PARTETAG']._serialized_start=686
-  _globals['_PARTETAG']._serialized_end=731
-  _globals['_COMPLETEUPLOADRESPONSE']._serialized_start=733
-  _globals['_COMPLETEUPLOADRESPONSE']._serialized_end=813
-  _globals['_REFRESHURLSREQUEST']._serialized_start=815
-  _globals['_REFRESHURLSREQUEST']._serialized_end=916
-  _globals['_ABORTUPLOADREQUEST']._serialized_start=918
-  _globals['_ABORTUPLOADREQUEST']._serialized_end=997
-  _globals['_ABORTUPLOADRESPONSE']._serialized_start=999
-  _globals['_ABORTUPLOADRESPONSE']._serialized_end=1037
-  _globals['_INGEST']._serialized_start=1163
-  _globals['_INGEST']._serialized_end=1254
-  _globals['_SEGMENTUPLOAD']._serialized_start=1257
-  _globals['_SEGMENTUPLOAD']._serialized_end=1683
+  _globals['_INGEST']._serialized_start=286
+  _globals['_INGEST']._serialized_end=377
 # @@protoc_insertion_point(module_scope)

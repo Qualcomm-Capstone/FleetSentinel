@@ -37,6 +37,9 @@ public class ObjectStoreProperties {
     /** MinIO 엔드포인트. 비우면 AWS 기본 엔드포인트를 쓴다. */
     private String endpoint = "";
 
+    /** Public endpoint used only for signatures (e.g. HTTPS proxy in front of internal MinIO). */
+    private String presignEndpoint = "";
+
     /**
      * MinIO는 가상 호스트 스타일(`bucket.host`)을 기본 지원하지 않는다.
      * 로컬에서는 반드시 true여야 한다.
@@ -81,6 +84,16 @@ public class ObjectStoreProperties {
 
     @AssertTrue(message = "endpoint must be an absolute HTTP(S) URL without credentials, query or fragment")
     public boolean isEndpointValid() {
+        return validEndpoint(endpoint);
+    }
+
+    @AssertTrue(message = "presign-endpoint must be an absolute HTTPS URL without credentials, query or fragment")
+    public boolean isPresignEndpointValid() {
+        return presignEndpoint == null || presignEndpoint.isBlank()
+                || (presignEndpoint.startsWith("https://") && validEndpoint(presignEndpoint));
+    }
+
+    private static boolean validEndpoint(String endpoint) {
         if (endpoint == null || endpoint.isBlank()) return true;
         try {
             URI uri = URI.create(endpoint);

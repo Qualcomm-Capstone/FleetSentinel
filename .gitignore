@@ -65,6 +65,7 @@ pki/
 exploration/wal-run/
 # MQTT edge/operator stores and isolated development broker state (never commit keys/data).
 /mqtt-local/
+/mqtt-pki/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

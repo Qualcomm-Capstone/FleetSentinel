@@ -55,7 +55,13 @@ import org.springframework.test.annotation.DirtiesContext;
  * <p>인증서는 {@code scripts/gen-certs.sh}가 굽는다 — 테스트 전용 발급 경로를 따로 두면
  * "테스트는 통과하는데 운영에서 안 되는" 차이가 생긴다.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
+        "fleetsentinel.clips.enabled=false",
+        "management.endpoint.health.group.readiness.include=readinessState",
+        "spring.autoconfigure.exclude=org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
+                + "org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration,"
+                + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration"
+})
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @EmbeddedKafka(
         partitions = 1,

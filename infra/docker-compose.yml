@@ -36,6 +36,24 @@ x-kafka-env: &kafka-env
   CLUSTER_ID: fleetsentinel-kraft-0001
 
 services:
+  # 업로드 작업/참조 outbox용 개발 DB. 운영은 별도 HA/백업 구성이 필요하다.
+  postgres:
+    image: postgres:17.11-alpine
+    networks: [fleet]
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: fleetsentinel
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet-local
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleetsentinel"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   kafka1:
     <<: *kafka-common
     container_name: fleet-kafka1
@@ -109,6 +127,8 @@ services:
     environment:
       MINIO_ROOT_USER: admin
       MINIO_ROOT_PASSWORD: password
+      MINIO_API_STALE_UPLOADS_EXPIRY: 168h
+      MINIO_API_STALE_UPLOADS_CLEANUP_INTERVAL: 1h
     volumes:
       - minio-data:/data
     healthcheck:
@@ -117,6 +137,20 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  # 원본 클립의 외부 HTTPS 경로. scripts/gen-certs.sh 실행 후 --profile clips 사용.
+  minio-tls:
+    image: nginx:1.30.6-alpine
+    profiles: [clips]
+    networks: [fleet]
+    depends_on:
+      minio:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9443:9443"
+    volumes:
+      - ./minio-tls.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../pki/server:/pki/server:ro
 
   # 버킷 부트스트랩, 1회 실행 후 종료
   #   checkpoints — Flink 체크포인트
@@ -263,6 +297,7 @@ networks:
     name: fleet
 
 volumes:
+  postgres-data:
   kafka1-data:
   kafka2-data:
   kafka3-data:

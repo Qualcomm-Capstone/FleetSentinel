@@ -16,7 +16,12 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-flyway'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
     implementation 'org.apache.avro:avro:1.12.0'
+    implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'
     implementation 'software.amazon.awssdk:s3:2.54.6'
     implementation 'software.amazon.awssdk:sts:2.54.6'
     runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
@@ -24,7 +29,14 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.springframework.grpc:spring-grpc-test'
     testImplementation 'org.springframework.kafka:spring-kafka-test'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+    testImplementation 'org.testcontainers:testcontainers-kafka'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('processResources') {
+    from(rootProject.file('schemas/segment-ref.avsc')) { into 'schemas' }
 }
 
 protobuf {
@@ -52,7 +64,7 @@ tasks.named('test') {
 }
 
 tasks.register('integrationTest', Test) {
-    description = 'Runs gRPC mTLS and embedded Kafka integration tests.'
+    description = 'Runs MQTT/gRPC mTLS and PostgreSQL, MinIO, Kafka integration tests.'
     group = 'verification'
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath

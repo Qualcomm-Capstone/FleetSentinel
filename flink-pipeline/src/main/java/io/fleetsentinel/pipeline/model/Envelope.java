@@ -97,6 +97,12 @@ public final class Envelope implements Serializable {
         }
         long seq = Long.parseLong(seqRaw);
         if (seq < 0) throw new IllegalArgumentException("negative sequence");
+        String origin = header(record, "producer_origin");
+        if (origin != null && (!"clip-upload".equals(origin)
+                || !"RECORD_KIND_SEGMENT_REF".equals(kind) || !bootId.startsWith("clip-")
+                || seq != 0 || stream != null)) {
+            throw new IllegalArgumentException("invalid server clip reference identity");
+        }
         return new Envelope(vehicleId, bootId, seq, kind,
                 record.value(), record.topic(), stream == null ? "legacy" : stream, interval,
                 stream == null ? bootId : sourceBoot).withSource(record);
@@ -129,6 +135,13 @@ public final class Envelope implements Serializable {
     public long reportIntervalMs() { return reportIntervalMs; }
     public String sourceBootId() { return sourceBootId == null ? bootId : sourceBootId; }
     public boolean mqtt() { return !"legacy".equals(streamId()); }
+
+    /** Server outbox retries retain their storage identity, independently of sensor sequences. */
+    public boolean serverClipReference() {
+        return "RECORD_KIND_SEGMENT_REF".equals(kind) && sourceHeaders().stream().anyMatch(h ->
+                "producer_origin".equals(h.key()) && h.value() != null
+                        && "clip-upload".equals(new String(h.value(), StandardCharsets.UTF_8)));
+    }
     public String dedupKey() {
         if (validationError != null) return "invalid\u0000" + topic + "\u0000" + sourcePartition;
         return mqtt() ? vehicleId + "\u0000" + bootId + "\u0000" + streamId() : vehicleId;

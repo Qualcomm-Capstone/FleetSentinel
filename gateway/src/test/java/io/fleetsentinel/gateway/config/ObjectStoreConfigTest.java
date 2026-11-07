@@ -21,6 +21,24 @@ class ObjectStoreConfigTest {
             .withUserConfiguration(ObjectStoreConfig.class);
 
     @Test
+    void publicHttpsEndpointIsSignedWhileInternalClientKeepsPrivateEndpoint() {
+        runner.withPropertyValues("fleetsentinel.object-store.endpoint=http://minio:9000",
+                "fleetsentinel.object-store.presign-endpoint=https://objects.example.test:9443",
+                "fleetsentinel.object-store.path-style-access=true",
+                "fleetsentinel.object-store.credentials-mode=static",
+                "fleetsentinel.object-store.access-key=test-access", "fleetsentinel.object-store.secret-key=test-secret")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var signed = context.getBean(S3Presigner.class).presignUploadPart(b -> b
+                            .signatureDuration(java.time.Duration.ofMinutes(1))
+                            .uploadPartRequest(p -> p.bucket("raw").key("clip.mcap").uploadId("id").partNumber(1)));
+                    assertThat(signed.url().toString()).startsWith("https://objects.example.test:9443/raw/clip.mcap?");
+                    assertThat(context.getBean(S3Client.class).serviceClientConfiguration().endpointOverride())
+                            .contains(java.net.URI.create("http://minio:9000"));
+                });
+    }
+
+    @Test
     void usesDefaultCredentialChainWithoutResolvingExternalCredentials() {
         // Given / When
         runner.run(context -> {

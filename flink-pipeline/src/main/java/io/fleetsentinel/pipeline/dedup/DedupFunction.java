@@ -63,6 +63,13 @@ public class DedupFunction extends KeyedProcessFunction<String, Envelope, Envelo
             out.collect(env);
             return;
         }
+        // Clip outbox retries can be arbitrarily delayed. Their immutable storage key
+        // is deduplicated by ClickHouse FINAL; do not mutate the sensor sequence window.
+        if (env.serverClipReference()) {
+            accepted.inc();
+            out.collect(env);
+            return;
+        }
         // 이 차량의 비트맵을 꺼낸다. 처음 보는 차량이면 null 이라 새로 만든다.
         SeqWindow w = state.value();
         if (w == null) {

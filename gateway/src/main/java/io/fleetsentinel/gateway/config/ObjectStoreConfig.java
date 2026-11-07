@@ -32,6 +32,8 @@ public class ObjectStoreConfig {
         var builder = S3Client.builder()
                 .region(Region.of(p.getRegion()))
                 .credentialsProvider(credentials)
+                .overrideConfiguration(c -> c.apiCallTimeout(java.time.Duration.ofSeconds(40))
+                        .apiCallAttemptTimeout(java.time.Duration.ofSeconds(15)))
                 // MinIO는 가상 호스트 스타일을 기본 지원하지 않는다.
                 .serviceConfiguration(S3Configuration.builder()
                         .pathStyleAccessEnabled(p.isPathStyleAccess())
@@ -50,8 +52,10 @@ public class ObjectStoreConfig {
                 .serviceConfiguration(S3Configuration.builder()
                         .pathStyleAccessEnabled(p.isPathStyleAccess())
                         .build());
-        if (p.getEndpoint() != null && !p.getEndpoint().isBlank()) {
-            builder.endpointOverride(URI.create(p.getEndpoint()));
+        String endpoint = p.getPresignEndpoint() == null || p.getPresignEndpoint().isBlank()
+                ? p.getEndpoint() : p.getPresignEndpoint();
+        if (endpoint != null && !endpoint.isBlank()) {
+            builder.endpointOverride(URI.create(endpoint));
         }
         return builder.build();
     }

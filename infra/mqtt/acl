@@ -3,6 +3,8 @@ pattern write fleet/v1/%u/up/+
 pattern write fleet/v1/%u/reported
 pattern read fleet/v1/%u/ack/+
 pattern read fleet/v1/%u/command
+pattern write fleet/v1/%u/clip/request
+pattern read fleet/v1/%u/clip/response
 
 user bridge
 topic read fleet/v1/+/up/+
@@ -11,3 +13,12 @@ topic write fleet/v1/+/ack/+
 user command-service
 topic write fleet/v1/+/command
 topic read fleet/v1/+/reported
+
+# Each replica needs its own certificate CN (broker binds client ID to CN).
+user clip-service
+topic read fleet/v1/+/clip/request
+topic write fleet/v1/+/clip/response
+
+user clip-service-2
+topic read fleet/v1/+/clip/request
+topic write fleet/v1/+/clip/response

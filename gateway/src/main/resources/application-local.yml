@@ -1,3 +1,8 @@
+spring:
+  datasource:
+    username: ${CLIP_DB_USERNAME:fleet}
+    password: ${CLIP_DB_PASSWORD:fleet-local}
+
 fleetsentinel:
   object-store:
     endpoint: ${MINIO_ENDPOINT:http://localhost:9000}

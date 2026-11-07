@@ -22,7 +22,7 @@ umask 077
 mkdir -m 700 -p "$target"
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=FleetSentinel-MQTT-Dev-CA \
   -keyout "$target/ca.key" -out "$target/ca.crt" >/dev/null 2>&1
-for name in server bridge command-service "$@"; do
+for name in server bridge command-service clip-service clip-service-2 "$@"; do
   openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$name" \
     -keyout "$target/$name.key" -out "$target/$name.csr" >/dev/null 2>&1
   extension="$root/infra/mqtt/client.ext"
