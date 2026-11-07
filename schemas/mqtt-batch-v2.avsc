@@ -1,0 +1,21 @@
+{
+  "type": "record",
+  "name": "MqttBatchV2",
+  "namespace": "io.fleetsentinel.telemetry",
+  "doc": "MQTT upload frame: ASCII FSMQ, byte 0x02, 32-byte SHA-256 of that prefix plus this schemaless Avro body, then the body. No Avro container header. Freeze this schema; incompatible changes require a new frame version. ACKs and commands remain JSON v1.",
+  "fields": [
+    {"name": "vehicle_id", "type": "string"},
+    {"name": "boot_id", "type": "string"},
+    {"name": "stream", "type": {"type": "enum", "name": "MqttStreamV2", "symbols": ["event", "status", "history"]}},
+    {"name": "records", "type": {"type": "array", "items": {
+      "type": "record",
+      "name": "MqttRecordV2",
+      "fields": [
+        {"name": "seq", "type": "long"},
+        {"name": "kind", "type": {"type": "enum", "name": "MqttRecordKindV2", "symbols": ["signal", "perception"]}},
+        {"name": "payload", "type": "bytes"},
+        {"name": "report_interval_ms", "type": "int"}
+      ]
+    }}}
+  ]
+}

@@ -22,10 +22,10 @@ def test_batch_rejects_tampering_and_topic_impersonation():
     assert Batch.parse(batch.wire(), batch.topic()) == batch
     with pytest.raises(ValueError):
         Batch.parse(batch.wire(), "fleet/v1/vehicle-2/up/status")
-    value = json.loads(batch.wire())
-    value["records"][0]["seq"] = 3
+    value = bytearray(batch.wire())
+    value[-1] ^= 1
     with pytest.raises(ValueError):
-        Batch.parse(json.dumps(value).encode(), batch.topic())
+        Batch.parse(bytes(value), batch.topic())
 
 
 def test_restart_keeps_batch_identity_and_only_matching_application_ack_deletes(tmp_path):
